@@ -1,0 +1,58 @@
+TAGLINE:
+Export Figma variables and styles to JSON, CSV, CSS, JS, or DTCG — then push to GitHub.
+
+DESCRIPTION:
+Variform is a Figma plugin that exports variables and local styles to JSON, JavaScript, CSV, CSS, or Tailwind CSS. Select collections and themes, preview output live, normalize to the Design Tokens (DTCG) format, and push commits to GitHub with a token-level diff and pull request — without leaving Figma.
+
+Features
+Multiple Export Formats: JSON, JavaScript, CSV, CSS, and Tailwind CSS
+DTCG / DSCG Normalization: Emit standards-compliant design token files
+Local Styles Export: Text, paint, effect, and grid styles alongside variables
+Selective Export: Choose collections, modes, and style types with a live preview
+Push to GitHub: Connect a repo, review a diff, commit on a branch, and open a PR
+Format-Specific Menu Commands: Direct access to each export format from the Figma menu
+Linked Variable Support: Properly handles linked variables across all formats
+Preview & Copy: Preview exported data and easily copy to clipboard
+Download: Exported variables can be downloaded as files
+Row/Column Positioning: CSV option for spreadsheet formula-like linking
+
+Linked Variable Handling
+JSON: Linked variables start with `$.VARIABLE.PATH`
+DTCG: Linked variables become `{Group.path}` references
+JavaScript: Linked variables are referenced directly like collection.mode.variable
+CSV: Linked variables start with `=VARIABLE/PATH` (with optional row/column positioning)
+CSS: Linked variables use CSS custom property syntax: `--var-name: var(--VARIABLE)`
+Tailwind CSS: Linked variables use CSS custom property syntax with Tailwind naming conventions
+
+*Note: When dealing with linked variables that have multiple modes, the plugin will only link to the first occurrence (i.e., the first mode it finds).
+
+Usage
+
+Design Mode
+1. Open your Figma file containing variables
+2. Run the Variform plugin from the Plugins menu
+3. Choose your desired export format (JSON, JS, CSV or CSS)
+4. Select collections, themes, and local styles to include
+5. Click "Export Variables"
+6. Download the file or use "Push to GitHub" to commit and open a PR
+
+Dev Mode
+1. Open your Figma file containing variables
+2. Switch to Dev Mode
+3. Run the Variform plugin from the Plugins menu
+4. Choose your desired export format (JSON, JS, CSV or CSS)
+5. Select collections, themes, and local styles to include
+6. Click "Export Variables"
+7. Download the file or use "Push to GitHub" to commit and open a PR
+
+Preview and Copy
+* Toggle the "Preview output" switch to see the exported data within the plugin interface.
+* Copy the results in one click!
+
+Variform is open source (GPL-3.0). Fork of VarVar by Atropical. Code on GitHub: https://github.com/minikas/Variform
+For bug reports, suggestions, or questions, please open an issue.
+
+
+
+TAGS:
+variables, export variables, variables to json, variables to javascript, variables to csv, variables to css, variables to tailwind, tailwind css, developer, tokens, export, json, csv, css, design tokens, figma variables, menu commands, quick export, github, dtcg, design tokens community group, local styles, pull request

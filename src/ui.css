@@ -1,0 +1,184 @@
+/* Window/body scroll: hide the scrollbar (keep scrolling functional). */
+html,
+body {
+  scrollbar-width: none; /* Firefox / modern Chromium */
+  -ms-overflow-style: none; /* legacy Edge */
+}
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent; /* WebKit / Chromium */
+}
+
+/* Panels whose scrollbar should be hidden entirely (e.g. the code preview). */
+.varvar-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.varvar-scroll-hidden::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
+/* The left form column keeps a thin, subtle (but always-visible) scrollbar.
+   We deliberately do NOT set `scrollbar-width` here: in Chromium 121+ that
+   property disables the custom `::-webkit-scrollbar` and falls back to the
+   native overlay scrollbar (invisible at rest). Styling the webkit pseudo-
+   elements alone forces a persistent, thin scrollbar. */
+.varvar-scroll-thin::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.varvar-scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.varvar-scroll-thin::-webkit-scrollbar-thumb {
+  background-color: var(--figma-color-text-tertiary, rgba(0, 0, 0, 0.35));
+  border-radius: 999px;
+  /* Transparent border + padding-box clip makes the thumb read as ~6px. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.varvar-scroll-thin::-webkit-scrollbar-thumb:hover {
+  background-color: var(--figma-color-text-secondary, rgba(0, 0, 0, 0.55));
+  background-clip: padding-box;
+}
+
+/* ── GitHub-style unified diff ─────────────────────────────────────────────
+   Mimics GitHub's diff view (Primer tokens):
+     light  addition line #e6ffec / gutter #ccffd8 / word #abf2bc
+            deletion line #ffebe9 / gutter #ffd7d5 / word rgba(255,129,130,.4)
+     dark   addition line rgba(46,160,67,.15) / word rgba(46,160,67,.4)
+            deletion line rgba(248,81,73,.15) / word rgba(248,81,73,.4)
+   The plugin runs in Figma's light AND dark themes, so we use translucent
+   green/red overlays as the default (they read correctly on either a light or
+   dark background) and bump the alpha up under prefers-color-scheme: dark to
+   match GitHub's stronger dark-mode tints. Text stays --figma-color-text. */
+.varvar-diff {
+  border: 1px solid var(--figma-color-border);
+  border-radius: 4px;
+  overflow: hidden;
+  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.varvar-diff-row {
+  display: flex;
+  align-items: flex-start;
+  color: var(--figma-color-text);
+}
+
+/* Fixed-width sign gutter (the +/− column). */
+.varvar-diff-gutter {
+  flex: 0 0 auto;
+  width: 18px;
+  padding: 1px 0;
+  text-align: center;
+  user-select: none;
+  color: var(--figma-color-text-secondary);
+}
+
+.varvar-diff-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 6px 1px 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Addition rows: light #e6ffec line / #ccffd8 gutter. */
+.varvar-diff-add {
+  background-color: rgba(46, 160, 67, 0.12);
+}
+.varvar-diff-add .varvar-diff-gutter {
+  background-color: rgba(46, 160, 67, 0.22);
+  color: var(--figma-color-text-success, #1a7f37);
+}
+
+/* Deletion rows: light #ffebe9 line / #ffd7d5 gutter. */
+.varvar-diff-del {
+  background-color: rgba(248, 81, 73, 0.12);
+}
+.varvar-diff-del .varvar-diff-gutter {
+  background-color: rgba(248, 81, 73, 0.22);
+  color: var(--figma-color-text-danger, #cf222e);
+}
+
+/* Word-level (intra-line) highlight on the actually-changed segment. */
+.varvar-diff-add .varvar-diff-word {
+  background-color: rgba(46, 160, 67, 0.4);
+  border-radius: 2px;
+}
+.varvar-diff-del .varvar-diff-word {
+  background-color: rgba(248, 81, 73, 0.4);
+  border-radius: 2px;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* GitHub dark uses rgba(…, .15) for the line and ~.4 for words. */
+  .varvar-diff-add {
+    background-color: rgba(46, 160, 67, 0.15);
+  }
+  .varvar-diff-add .varvar-diff-gutter {
+    background-color: rgba(46, 160, 67, 0.3);
+  }
+  .varvar-diff-del {
+    background-color: rgba(248, 81, 73, 0.15);
+  }
+  .varvar-diff-del .varvar-diff-gutter {
+    background-color: rgba(248, 81, 73, 0.3);
+  }
+  .varvar-diff-add .varvar-diff-word {
+    background-color: rgba(46, 160, 67, 0.45);
+  }
+  .varvar-diff-del .varvar-diff-word {
+    background-color: rgba(248, 81, 73, 0.45);
+  }
+}
+
+/* GitHub-style diffstat dots in the summary line. */
+.varvar-diff-stat {
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.varvar-diff-stat-add {
+  background-color: rgba(46, 160, 67, 0.6);
+}
+.varvar-diff-stat-del {
+  background-color: rgba(248, 81, 73, 0.6);
+}
+.varvar-diff-stat-mod {
+  background-color: var(--figma-color-bg-warning-tertiary, rgba(174, 116, 0, 0.6));
+}
+
+/* Loading skeleton shown in the code preview while an export is in flight. */
+@keyframes varvar-skeleton-shimmer {
+  0% {
+    background-position: -160px 0;
+  }
+  100% {
+    background-position: calc(160px + 100%) 0;
+  }
+}
+.varvar-skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.08);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.18) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 160px 100%;
+  background-repeat: no-repeat;
+  background-position: -160px 0;
+  animation: varvar-skeleton-shimmer 1.2s infinite;
+}
