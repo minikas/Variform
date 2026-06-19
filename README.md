@@ -4,6 +4,8 @@ Variform is a Figma plugin that allows you to export your Figma variables **and 
 
 Variform is a fork of [VarVar](https://github.com/atropical/varvar) by [Atropical AS](https://atropical.no), extended with GitHub sync, DTCG normalization, local styles export, selective collection/mode export, and an improved UI.
 
+![Variform plugin interface](public/screenshot.png)
+
 ## Features
 
 - **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS (vanilla or Tailwind CSS v4), or JavaScript
