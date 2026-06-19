@@ -6,6 +6,15 @@ Variform is a fork of [VarVar](https://github.com/atropical/varvar) by [Atropica
 
 ![Variform plugin interface](public/screenshot.png)
 
+### Screenshots
+
+The GitHub sync flow lives next to the download button in every export view:
+
+| Connect to GitHub | Push to GitHub | Unlock a saved connection |
+| --- | --- | --- |
+| ![Connect to GitHub dialog](public/screenshot1.png) | ![Push to GitHub diff dialog](public/screenshot2.png) | ![Unlock GitHub passphrase dialog](public/screenshot3.png) |
+| Paste a fine-grained Personal Access Token (Contents + Pull requests = Read and write), **Validate** it, and optionally remember the connection — it's encrypted on-device with a passphrase. | Review a **token-level diff** (added · changed · removed) against the target branch, set the commit message and file path, then **Commit & create PR** without leaving Figma. | When a remembered connection is locked, enter your passphrase to decrypt the saved token for the current session. |
+
 ## Features
 
 - **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS (vanilla or Tailwind CSS v4), or JavaScript
