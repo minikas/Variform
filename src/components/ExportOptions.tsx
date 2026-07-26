@@ -1,6 +1,6 @@
 import React from "react";
-import { Flex, Switch, Label } from "figma-kit";
-import { OutputFormats } from "../types.d";
+import { Flex, Switch, Label, Select, Input } from "figma-kit";
+import { OutputFormats, TailwindColorMode, TailwindOutput, TailwindUnit } from "../types.d";
 import { SectionAccordion } from "./SectionAccordion";
 import { ParserSelect } from "./ParserSelect";
 import { FilenameInput } from "./FilenameInput";
@@ -10,10 +10,17 @@ interface ExportOptionsProps {
     useRowColumnPos: boolean;
     useTailwindFormat?: boolean;
     useDSCGFormat?: boolean;
+    tailwindOutput?: TailwindOutput;
+    tailwindPrefix?: string;
+    tailwindUnit?: TailwindUnit;
+    tailwindColorMode?: TailwindColorMode;
     filename: string;
     onUseRowColumnPosChange: (useRowColumnPos: boolean) => void;
     onUseTailwindFormatChange?: (useTailwindFormat: boolean) => void;
     onUseDSCGFormatChange?: (useDSCGFormat: boolean) => void;
+    onTailwindPrefixChange?: (tailwindPrefix: string) => void;
+    onTailwindUnitChange?: (tailwindUnit: TailwindUnit) => void;
+    onTailwindColorModeChange?: (tailwindColorMode: TailwindColorMode) => void;
     onFilenameChange: (filename: string) => void;
 }
 
@@ -27,15 +34,23 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
     useRowColumnPos,
     useTailwindFormat = false,
     useDSCGFormat = false,
+    tailwindOutput = "css",
+    tailwindPrefix = "",
+    tailwindUnit = "px",
+    tailwindColorMode = "var-fallback",
     filename,
     onUseRowColumnPosChange,
     onUseTailwindFormatChange,
     onUseDSCGFormatChange,
+    onTailwindPrefixChange,
+    onTailwindUnitChange,
+    onTailwindColorModeChange,
     onFilenameChange
 }) => {
     const showCsvOption = format === OutputFormats.CSV;
     const showTailwindOption = format === OutputFormats.CSS && !!onUseTailwindFormatChange;
     const showDSCGOption = format === OutputFormats.JSON && !!onUseDSCGFormatChange;
+    const showTailwindFormatOptions = format === OutputFormats.TAILWIND;
 
     // The description parser applies to the formats that emit the description as
     // data: JSON (non-DSCG), JavaScript and CSV.
@@ -44,8 +59,13 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
         format === OutputFormats.JS ||
         format === OutputFormats.CSV;
 
+    // The Tailwind format downloads as .css or .js depending on the output.
+    const effectiveFormat = showTailwindFormatOptions
+        ? (tailwindOutput === "preset" ? OutputFormats.JS : OutputFormats.CSS)
+        : format;
+
     // The collapsed header shows the resulting output filename.
-    const optionsSummary = `${filename}.${format}`;
+    const optionsSummary = `${filename}.${effectiveFormat}`;
 
     return (
         <SectionAccordion label="Options" summary={optionsSummary}>
@@ -96,12 +116,74 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
                     </Flex>
                 )}
 
+                {/* Tailwind-format options. The output kind (CSS v4 vs preset
+                    v3) is switched in the preview header. */}
+                {showTailwindFormatOptions && (
+                    <>
+                        <Flex direction="column" gap="1">
+                            <Label
+                                htmlFor="varvar-tailwind-prefix"
+                                style={{ color: "var(--figma-color-text-secondary)" }}
+                            >
+                                Prefix (optional)
+                            </Label>
+                            <Input
+                                id="varvar-tailwind-prefix"
+                                placeholder="Ex.: acme"
+                                value={tailwindPrefix}
+                                onChange={(e) => onTailwindPrefixChange?.(e.target.value.trim())}
+                            />
+                        </Flex>
+                        <Flex direction="column" gap="1">
+                            <Label
+                                htmlFor="varvar-tailwind-unit"
+                                style={{ color: "var(--figma-color-text-secondary)" }}
+                            >
+                                Unit
+                            </Label>
+                            <Select.Root
+                                value={tailwindUnit}
+                                onValueChange={(value) => onTailwindUnitChange?.(value as TailwindUnit)}
+                            >
+                                <Select.Trigger id="varvar-tailwind-unit" placeholder="px" />
+                                <Select.Content portal>
+                                    <Select.Item value="px">px</Select.Item>
+                                    <Select.Item value="rem">rem (16px base)</Select.Item>
+                                    <Select.Item value="em">em (16px base)</Select.Item>
+                                </Select.Content>
+                            </Select.Root>
+                        </Flex>
+                        {tailwindOutput === "preset" && (
+                            <Flex direction="column" gap="1">
+                                <Label
+                                    htmlFor="varvar-tailwind-color-mode"
+                                    style={{ color: "var(--figma-color-text-secondary)" }}
+                                >
+                                    Colors
+                                </Label>
+                                <Select.Root
+                                    value={tailwindColorMode}
+                                    onValueChange={(value) => onTailwindColorModeChange?.(value as TailwindColorMode)}
+                                >
+                                    <Select.Trigger id="varvar-tailwind-color-mode" placeholder="var() + fallback" />
+                                    <Select.Content portal>
+                                        <Select.Item value="var-fallback">var() + hex fallback</Select.Item>
+                                        <Select.Item value="var">var() only</Select.Item>
+                                        <Select.Item value="concrete">Concrete rgb()</Select.Item>
+                                        <Select.Item value="hex">Hex (#rrggbb)</Select.Item>
+                                    </Select.Content>
+                                </Select.Root>
+                            </Flex>
+                        )}
+                    </>
+                )}
+
                 {/* Description parser (JSON non-DSCG, JavaScript, CSV) */}
                 <ParserSelect show={showParser} />
 
                 {/* Output filename */}
                 <FilenameInput
-                    format={format}
+                    format={effectiveFormat}
                     filename={filename}
                     onFilenameChange={onFilenameChange}
                 />

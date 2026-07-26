@@ -1,6 +1,6 @@
 # Variform - Figma Variable Export Plugin
 
-Variform is a Figma plugin that allows you to export your Figma variables **and styles** to JSON, CSV, CSS, or JavaScript formats, making it easier to integrate your design tokens into your development workflow.
+Variform is a Figma plugin that allows you to export your Figma variables **and styles** to JSON, CSV, CSS, JavaScript, or Tailwind formats, making it easier to integrate your design tokens into your development workflow.
 
 Variform is a fork of [VarVar](https://github.com/atropical/varvar) by [Atropical AS](https://atropical.no), extended with GitHub sync, DTCG normalization, local styles export, selective collection/mode export, and an improved UI.
 
@@ -17,7 +17,8 @@ The GitHub sync flow lives next to the download button in every export view:
 
 ## Features
 
-- **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS (vanilla or Tailwind CSS v4), or JavaScript
+- **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS, JavaScript, or Tailwind (CSS v4 `@theme` stylesheet or v3 preset dictionary)
+- **Tailwind Options**: Token prefix, px/rem/em units, and four color modes (CSS-var reference with hex fallback, bare var, concrete rgb, or hex) — remembered per file
 - **Push to GitHub**: Connect a repository, preview a token-level diff, commit on a new branch, and open a pull request — without leaving Figma
 - **Refined UI**: Accordion-based selection, live preview with skeleton loading, inspect modals, and inline diff review before pushing
 - **Selective Export**: Pick exactly which collections and modes (themes) to export from a real-time accordion — everything is selected by default, and the preview updates as you toggle
@@ -39,6 +40,7 @@ The GitHub sync flow lives next to the download button in every export view:
   - **Option:** Use row & column positions to produce formula-like linking (i.e. `=E7`) in spreadsheet programs
 - **CSS**: Linked variables use CSS custom property syntax: `--var-name: var(--VARIABLE)`
 - **Tailwind CSS**: Linked variables use CSS custom property syntax with Tailwind naming conventions
+- **Tailwind preset**: Linked variables are resolved to the terminal token — the value references that token's CSS variable (with a hex fallback)
 
 > **Note:** When dealing with linked variables that have multiple modes, the plugin will only link to the first occurrence (i.e., the first mode).
 
@@ -145,12 +147,11 @@ For format selection within the interface:
 5. Click "Export Variables"
 6. The exported file will be automatically downloaded
 
-### Preview and Copy
+### Preview, Search and Copy
 
-- Toggle the "Preview output" switch to see the exported data within the plugin interface
-- Use the "Select to Copy" button and copy (Ctrl/Cmd + C) the exported data to your clipboard
-
-> **Note:** Programmatically copying is currently not supported by Figma Plugin APIs.
+- The preview updates in real time as you change the format, options, or selection (debounced, with a skeleton while loading).
+- For multi-output formats (Tailwind), a dropdown in the preview header switches between the generated files.
+- Use the **Search** field to filter the displayed lines, and the **Copy** button to copy the full export to your clipboard.
 
 ### Push to GitHub
 
@@ -163,6 +164,25 @@ Every export view includes **Connect GitHub…** / **Push to GitHub** next to th
 5. **Push** — creates the branch when needed, commits the file, and opens a pull request automatically. If PR creation fails (e.g. one already exists), a compare URL is provided as a fallback.
 
 > **Security:** Your token is sent only to the configured GitHub host over HTTPS. It is never logged or embedded in exported files.
+
+## Tailwind Export
+
+The **Tailwind** format produces two complementary files, switched from the dropdown in the preview header (the download/push extension follows: `.css` or `.js`):
+
+- **CSS (v4, @theme)** — a Tailwind CSS v4 stylesheet with a `@theme` block (`--color-*`, `--spacing-*`, … detected from naming conventions) and `@custom-variant` entries for non-default modes.
+- **Preset (v3, theme.extend)** — a `tailwind.config.js`-style dictionary (`module.exports = { theme: { extend: … } }`). Tokens are grouped under Tailwind categories (`colors`, `spacing`, `fontSize`, `borderRadius`, `boxShadow`, `opacity`, …) with the Figma `/` groups nested inside. Since a preset is static, values come from the first selected mode of each collection and aliases are resolved to the terminal token.
+
+The two outputs are designed to work together: preset colors reference the very CSS variables the CSS v4 export defines, so switching themes updates your Tailwind utilities automatically.
+
+### Tailwind options (remembered per file)
+
+- **Prefix** — prepended to every token family (`colors: { "acme-blue": … }`, `--color-acme-…`).
+- **Unit** — `px`, `rem` or `em` (16px base) for length tokens in both outputs.
+- **Colors** (preset only) — how color values are emitted:
+  - `var() + hex fallback` (default): `rgb(from var(--color-grayscale--400, #9ea1ab) r g b / <alpha-value>)` — opacity modifiers like `bg-grayscale-400/20` work, and the preset stays functional standalone.
+  - `var() only`: `var(--color-grayscale--400)` — requires the CSS file to be loaded.
+  - `rgb() concrete`: `rgb(158 161 171 / 1)` — fully standalone.
+  - `hex`: `#9ea1ab` (`#rrggbbaa` when the color has alpha).
 
 ## DSCG / DTCG Format
 
@@ -287,7 +307,8 @@ src/
 │   ├── collectionToCSV.ts
 │   ├── collectionToCSS.ts
 │   ├── collectionToJS.ts
-│   ├── collectionToTailwind.ts
+│   ├── collectionToTailwind.ts    # Tailwind CSS v4 (@theme) export
+│   ├── collectionToTailwindPreset.ts  # Tailwind v3 preset (theme.extend) export
 │   ├── descriptionParsers.ts
 │   ├── selectionUtils.ts      # Filters collections/modes by the export selection
 │   ├── selectionState.ts      # Pure selection reducers (toggle, tri-state, reconcile)

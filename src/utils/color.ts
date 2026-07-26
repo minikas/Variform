@@ -44,3 +44,17 @@ export const rgbToHex8 = ({ r, g, b, a = 1 }: RGBA): string => {
   const alphaHex = toHex(a);
   return `#${toHex(r)}${toHex(g)}${toHex(b)}${alphaHex === "ff" ? "" : alphaHex}`;
 };
+
+/**
+ * Converts an RGBA color to the modern space-separated `rgb()` syntax with an
+ * explicit alpha channel. Used by the Tailwind exporters so opacity modifiers
+ * (e.g. `bg-primary/20`) keep working on the exported tokens — with bare hex
+ * values the modifier cannot inject the alpha channel.
+ * @param {RGBA} param0 - The RGBA color to convert
+ * @returns {string} The color as `rgb(R G B / A)`
+ */
+export const rgbToTailwindColor = ({ r, g, b, a = 1 }: RGBA): string => {
+  const channels = [r, g, b].map((n) => Math.round(n * 255)).join(" ");
+  const alpha = Math.round(a * 100) / 100;
+  return `rgb(${channels} / ${alpha})`;
+};

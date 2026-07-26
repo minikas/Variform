@@ -25,7 +25,6 @@ export const ExportJSON: React.FC<ExportJSONProps> = ({ editorType = "" }) => {
         setUseDSCGFormat,
         exportedData,
         canExport,
-        handleSelectToCopy,
         handleDownload
     } = useExportData({ format });
 
@@ -59,7 +58,6 @@ export const ExportJSON: React.FC<ExportJSONProps> = ({ editorType = "" }) => {
         <OutputPreview 
             exportedData={exportedData}
             editorType={editorType}
-            onSelectToCopy={handleSelectToCopy}
         />
     ) : null;
 

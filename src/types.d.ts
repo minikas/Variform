@@ -66,8 +66,26 @@ export enum OutputFormats {
   JSON = "json", 
   CSS = "css",
   JS = "js",
-  TS = "ts"
+  TS = "ts",
+  TAILWIND = "tailwind"
 }
+
+/**
+ * Which output the Tailwind format produces: a Tailwind CSS v4 stylesheet
+ * (`@theme` + `@custom-variant`) or a Tailwind v3 preset (dictionary with
+ * `theme.extend`). The download extension follows the output (css / js).
+ */
+export type TailwindOutput = "css" | "preset";
+
+/** Length unit for Tailwind exports (rem/em are converted from a 16px base). */
+export type TailwindUnit = "px" | "rem" | "em";
+
+/**
+ * How colors are emitted in the Tailwind v3 preset: referencing the CSS
+ * variable with a hex fallback, the bare variable, a concrete rgb() value,
+ * or plain hex (hex8 when the color has alpha).
+ */
+export type TailwindColorMode = "var-fallback" | "var" | "concrete" | "hex";
 
 /**
  * Plugin command types for menu actions
@@ -156,6 +174,11 @@ export interface PluginMessage {
   useLinkedVarRowAndColPos?: boolean;
   useTailwindFormat?: boolean;
   useDSCGFormat?: boolean;
+  // Tailwind-format options (only meaningful when format === TAILWIND).
+  tailwindOutput?: TailwindOutput;
+  tailwindPrefix?: string;
+  tailwindUnit?: TailwindUnit;
+  tailwindColorMode?: TailwindColorMode;
   count?: number;
   filename?: string;
   data?: string;

@@ -1,101 +1,136 @@
-import { rgbToCssColor } from "./color";
+import { rgbToTailwindColor } from "./color";
 import { toCssVar } from "./stringTransformation";
 import { getLocalStyles, stylesToTailwindTokens, filterStyles } from "./styleSerializers";
 import { isCollectionSelected, selectedModes } from "./selectionUtils";
 import { ALL_STYLES, anyStyleSelected } from "./styleSelection";
-import type { ExportSelection, StyleSelection } from "../types.d";
+import type { ExportSelection, StyleSelection, TailwindUnit } from "../types.d";
+
+/** Base font size used when converting px lengths to rem/em. */
+const REM_BASE_PX = 16;
 
 /**
- * Transforms variable names to Tailwind CSS v4+ conventions
+ * Formats a px length in the chosen unit. rem/em values are converted from a
+ * 16px base and rounded to 4 decimal places (e.g. 10px → "0.625rem").
+ * @param value - The length in px
+ * @param unit - Target unit (px, rem or em)
+ * @returns The formatted length string
+ */
+export function formatTailwindLength(value: number, unit: TailwindUnit = "px"): string {
+    if (unit === "px") return `${value}px`;
+    const converted = parseFloat((value / REM_BASE_PX).toFixed(4));
+    return `${converted}${unit}`;
+}
+
+/**
+ * Detects the Tailwind theme category for a variable from its resolved type and
+ * naming conventions. Returns the v4 theme-namespace segment (e.g. "color",
+ * "spacing", "font-size") or "" when no pattern matches.
  * @param name - Original variable name
  * @param resolvedType - Type of the variable
- * @returns Transformed name following Tailwind conventions
+ * @returns Tailwind category segment, or "" as fallback
  */
-function transformToTailwindName(name: string, resolvedType: string): string {
+export function detectTailwindCategory(name: string, resolvedType: string): string {
     const lowerName = name.toLowerCase();
-    
+
     // Auto-detect color variables
-    if (resolvedType === "COLOR" || 
-        lowerName.includes('color') || 
-        lowerName.includes('primary') || 
-        lowerName.includes('secondary') || 
+    if (resolvedType === "COLOR" ||
+        lowerName.includes('color') ||
+        lowerName.includes('primary') ||
+        lowerName.includes('secondary') ||
         lowerName.includes('accent') ||
         lowerName.includes('background') ||
         lowerName.includes('foreground') ||
         lowerName.includes('border') ||
         lowerName.includes('text')) {
-        return `--color-${toCssVar(name)}`;
+        return "color";
     }
-    
+
     // Auto-detect spacing/size variables
-    if (lowerName.includes('spacing') || 
-        lowerName.includes('margin') || 
+    if (lowerName.includes('spacing') ||
+        lowerName.includes('margin') ||
         lowerName.includes('padding') ||
         lowerName.includes('gap') ||
         lowerName.includes('space')) {
-        return `--spacing-${toCssVar(name)}`;
+        return "spacing";
     }
-    
+
     // Auto-detect size variables
-    if (lowerName.includes('size') || 
-        lowerName.includes('width') || 
+    if (lowerName.includes('size') ||
+        lowerName.includes('width') ||
         lowerName.includes('height') ||
         lowerName.includes('radius') ||
         lowerName.includes('border')) {
-        return `--size-${toCssVar(name)}`;
+        return "size";
     }
-    
+
     // Auto-detect typography variables
-    if (lowerName.includes('font') || 
-        lowerName.includes('text') || 
+    if (lowerName.includes('font') ||
+        lowerName.includes('text') ||
         lowerName.includes('line') ||
         lowerName.includes('letter') ||
         lowerName.includes('weight')) {
         if (lowerName.includes('family') || lowerName.includes('font')) {
-            return `--font-family-${toCssVar(name)}`;
+            return "font-family";
         } else if (lowerName.includes('size')) {
-            return `--font-size-${toCssVar(name)}`;
+            return "font-size";
         } else if (lowerName.includes('weight')) {
-            return `--font-weight-${toCssVar(name)}`;
+            return "font-weight";
         } else if (lowerName.includes('line')) {
-            return `--line-height-${toCssVar(name)}`;
+            return "line-height";
         } else if (lowerName.includes('letter')) {
-            return `--letter-spacing-${toCssVar(name)}`;
+            return "letter-spacing";
         }
-        return `--font-${toCssVar(name)}`;
+        return "font";
     }
-    
+
     // Auto-detect animation/transition variables
-    if (lowerName.includes('duration') || 
-        lowerName.includes('delay') || 
+    if (lowerName.includes('duration') ||
+        lowerName.includes('delay') ||
         lowerName.includes('ease') ||
         lowerName.includes('transition') ||
         lowerName.includes('animation')) {
-        return `--duration-${toCssVar(name)}`;
+        return "duration";
     }
-    
+
     // Auto-detect shadow variables
     if (lowerName.includes('shadow') || lowerName.includes('drop')) {
-        return `--shadow-${toCssVar(name)}`;
+        return "shadow";
     }
-    
+
     // Auto-detect opacity variables
     if (lowerName.includes('opacity') || lowerName.includes('alpha')) {
-        return `--opacity-${toCssVar(name)}`;
+        return "opacity";
     }
-    
-    // Keep original naming as fallback for unrecognized patterns
-    return `--${toCssVar(name)}`;
+
+    // No recognized pattern
+    return "";
+}
+
+/**
+ * Transforms variable names to Tailwind CSS v4+ conventions
+ * @param name - Original variable name
+ * @param resolvedType - Type of the variable
+ * @param prefix - Optional prefix inserted after the category segment
+ * @returns Transformed name following Tailwind conventions
+ */
+export function transformToTailwindName(name: string, resolvedType: string, prefix: string = ""): string {
+    const category = detectTailwindCategory(name, resolvedType);
+    const prefixSegment = prefix ? `${toCssVar(prefix)}-` : "";
+    return `--${category ? `${category}-` : ""}${prefixSegment}${toCssVar(name)}`;
 }
 
 /**
  * Processes a variable collection into Tailwind CSS v4+ format
  * @param collection - The variable collection to process
+ * @param selection - Optional export selection used to filter the modes
+ * @param prefix - Optional prefix inserted after the category segment
  * @returns Object containing theme variables and custom variants
  */
 async function processCollection(
     collection: VariableCollection,
-    selection?: ExportSelection
+    selection?: ExportSelection,
+    prefix: string = "",
+    unit: TailwindUnit = "px"
 ): Promise<{ theme: string[], variants: string[] }> {
     const { variableIds } = collection;
     const themeVars: string[] = [];
@@ -112,9 +147,9 @@ async function processCollection(
                 const value: VariableValue = valuesByMode[mode.modeId];
 
                 if (value !== undefined && validTypes.has(resolvedType)) {
-                    const tailwindVarName = transformToTailwindName(name, resolvedType);
+                    const tailwindVarName = transformToTailwindName(name, resolvedType, prefix);
                     let cssValue: string;
-        
+
                     const isColor: boolean = resolvedType === "COLOR";
                     const isNumber: boolean = resolvedType === "FLOAT";
                     const isBool: boolean = resolvedType === "BOOLEAN";
@@ -123,7 +158,7 @@ async function processCollection(
                         const linkedVar = await figma.variables.getVariableByIdAsync(value.id);
 
                         if(linkedVar) {
-                            const linkedName = transformToTailwindName(linkedVar.name, linkedVar.resolvedType);
+                            const linkedName = transformToTailwindName(linkedVar.name, linkedVar.resolvedType, prefix);
                             cssValue = `var(${linkedName})`;
                         }
                         else {
@@ -131,19 +166,19 @@ async function processCollection(
                         }
                     }
                     else {
-                        cssValue = isColor 
-                            ? rgbToCssColor(value as RGBA)
+                        cssValue = isColor
+                            ? rgbToTailwindColor(value as RGBA)
                             : isNumber
-                                ? `${parseFloat(value as string)}px`
+                                ? formatTailwindLength(parseFloat(value as string), unit)
                                 : isBool
                                     ? Boolean(value) ? '1' : '0'
                                     : `"${String(value)}"`;
                     }
                     cssVars.push(`  ${tailwindVarName}: ${cssValue};${description ? `\t/* ${description} */` : ''}`);
                 }
-            } 
+            }
         }
-        
+
         const isRoot = (mode.name === 'Default' || mode.name === 'Mode 1');
         if(isRoot) {
             themeVars.push(...cssVars);
@@ -153,13 +188,13 @@ async function processCollection(
             const variantName = `theme-${toCssVar(mode.name)}`;
             const selector = `&:where([data-theme="${mode.name}"] *)`;
             customVariants.push(`@custom-variant ${variantName} (${selector});`);
-            
+
             // Add mode-specific variables to theme block
             themeVars.push(...cssVars);
         }
         cssVars = [];
     }
-    
+
     return { theme: themeVars, variants: customVariants };
 }
 
@@ -167,11 +202,14 @@ async function processCollection(
  * Exports all local variable collections to Tailwind CSS v4+ format
  * @param selection - Optional export selection (omit to export everything)
  * @param styleSelection - Which local style kinds to append (default all)
+ * @param prefix - Optional prefix inserted after the category segment
  * @returns Tailwind CSS string with @theme directive and @custom-variant directives
  */
 export const exportToTailwind = async (
     selection?: ExportSelection,
-    styleSelection: StyleSelection = ALL_STYLES
+    styleSelection: StyleSelection = ALL_STYLES,
+    prefix: string = "",
+    unit: TailwindUnit = "px"
 ): Promise<string> => {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
     try {
@@ -180,7 +218,7 @@ export const exportToTailwind = async (
 
         for(const collection of collections) {
             if (!isCollectionSelected(collection.id, selection)) continue;
-            const { theme, variants } = await processCollection(collection, selection);
+            const { theme, variants } = await processCollection(collection, selection, prefix, unit);
             theme.forEach(v => themeVars.add(v));
             customVariants.push(...variants);
         }
@@ -196,7 +234,7 @@ export const exportToTailwind = async (
 
         // Combine theme and custom variants
         const result = [themeBlock, ...customVariants].join('\n\n');
-        
+
         return result;
     } catch (err) {
         console.error(err);

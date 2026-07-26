@@ -5,8 +5,9 @@ import { exportToJSON } from "./utils/collectionToJSON";
 import { exportToDSCG } from "./utils/collectionToDSCG";
 import { exportToCSS } from "./utils/collectionToCSS";
 import { exportToTailwind } from "./utils/collectionToTailwind";
+import { exportToTailwindPreset } from "./utils/collectionToTailwindPreset";
 import { exportToJS } from "./utils/collectionToJS";
-import { OutputFormats, MessageTypes, PluginCommands, PluginMessage, CollectionMeta, ExportSelection, StyleSelection } from "./types.d";
+import { OutputFormats, MessageTypes, PluginCommands, PluginMessage, CollectionMeta, ExportSelection, StyleSelection, TailwindOutput, TailwindUnit, TailwindColorMode } from "./types.d";
 import { ALL_STYLES } from "./utils/styleSelection";
 import { rgbToCssColor } from "./utils/color";
 import { getLocalStyles, stylesToInspectRows } from "./utils/styleSerializers";
@@ -63,7 +64,11 @@ async function handleExport(
     useDSCGFormat: boolean = false,
     selection?: ExportSelection,
     styleSelection: StyleSelection = ALL_STYLES,
-    parserId?: string
+    parserId?: string,
+    tailwindOutput: TailwindOutput = "css",
+    tailwindPrefix: string = "",
+    tailwindUnit: TailwindUnit = "px",
+    tailwindColorMode: TailwindColorMode = "var-fallback"
 ) {
     try {
         let data: string;
@@ -80,6 +85,11 @@ async function handleExport(
                 break;
             case OutputFormats.CSS:
                 data = useTailwindFormat ? await exportToTailwind(selection, styleSelection) : await exportToCSS(selection, styleSelection);
+                break;
+            case OutputFormats.TAILWIND:
+                data = tailwindOutput === "preset"
+                    ? await exportToTailwindPreset(selection, tailwindPrefix, tailwindUnit, tailwindColorMode)
+                    : await exportToTailwind(selection, styleSelection, tailwindPrefix, tailwindUnit);
                 break;
             default:
                 throw new Error(`Unsupported format: ${format}`);
@@ -237,7 +247,11 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
                     msg.useDSCGFormat || false,
                     msg.selection,
                     msg.styleSelection ?? ALL_STYLES,
-                    msg.parserId
+                    msg.parserId,
+                    msg.tailwindOutput ?? "css",
+                    msg.tailwindPrefix ?? "",
+                    msg.tailwindUnit ?? "px",
+                    msg.tailwindColorMode ?? "var-fallback"
                 );
             } else {
                 console.error('Export request missing format');

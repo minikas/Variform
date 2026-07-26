@@ -25,7 +25,6 @@ export const ExportCSV: React.FC<ExportCSVProps> = ({ editorType = "" }) => {
         setUseRowColumnPos,
         exportedData,
         canExport,
-        handleSelectToCopy,
         handleDownload
     } = useExportData({ format });
 
@@ -57,7 +56,6 @@ export const ExportCSV: React.FC<ExportCSVProps> = ({ editorType = "" }) => {
         <OutputPreview 
             exportedData={exportedData}
             editorType={editorType}
-            onSelectToCopy={handleSelectToCopy}
         />
     ) : null;
 

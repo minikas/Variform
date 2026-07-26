@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 import { MessageTypes, OutputFormats } from "../types.d";
-import type { CollectionMeta, ExportSelection, PluginMessage, StyleSelection } from "../types.d";
+import type { CollectionMeta, ExportSelection, PluginMessage, StyleSelection, TailwindColorMode, TailwindOutput, TailwindUnit } from "../types.d";
 import {
   initSelection,
   deselectAllSelection,
@@ -35,6 +35,10 @@ interface PersistedSelection {
   useRowColumnPos: boolean;
   useTailwindFormat: boolean;
   useDSCGFormat: boolean;
+  tailwindOutput: TailwindOutput;
+  tailwindPrefix: string;
+  tailwindUnit: TailwindUnit;
+  tailwindColorMode: TailwindColorMode;
   githubFilePath: string;
 }
 
@@ -68,6 +72,16 @@ interface SelectionContextValue {
   setUseTailwindFormat: (value: boolean) => void;
   useDSCGFormat: boolean;
   setUseDSCGFormat: (value: boolean) => void;
+  /** Tailwind-format options (persisted): which output and optional prefix. */
+  tailwindOutput: TailwindOutput;
+  setTailwindOutput: (value: TailwindOutput) => void;
+  tailwindPrefix: string;
+  setTailwindPrefix: (value: string) => void;
+  /** Tailwind length unit (px/rem/em) and color mode, persisted. */
+  tailwindUnit: TailwindUnit;
+  setTailwindUnit: (value: TailwindUnit) => void;
+  tailwindColorMode: TailwindColorMode;
+  setTailwindColorMode: (value: TailwindColorMode) => void;
   /** GitHub push file path, persisted per document. */
   githubFilePath: string;
   setGithubFilePath: (path: string) => void;
@@ -92,6 +106,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
   const [useRowColumnPos, setUseRowColumnPos] = useState<boolean>(false);
   const [useTailwindFormat, setUseTailwindFormat] = useState<boolean>(false);
   const [useDSCGFormat, setUseDSCGFormat] = useState<boolean>(false);
+  const [tailwindOutput, setTailwindOutput] = useState<TailwindOutput>("css");
+  const [tailwindPrefix, setTailwindPrefix] = useState<string>("");
+  const [tailwindUnit, setTailwindUnit] = useState<TailwindUnit>("px");
+  const [tailwindColorMode, setTailwindColorMode] = useState<TailwindColorMode>("var-fallback");
   const [githubFilePath, setGithubFilePath] = useState<string>("");
   const [filename, setFilename] = useState<string>("");
   // `undefined` until client storage replies; then the raw stored string or null.
@@ -177,6 +195,18 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
         if (typeof parsed.useDSCGFormat === "boolean") {
           setUseDSCGFormat(parsed.useDSCGFormat);
         }
+        if (parsed.tailwindOutput === "css" || parsed.tailwindOutput === "preset") {
+          setTailwindOutput(parsed.tailwindOutput);
+        }
+        if (typeof parsed.tailwindPrefix === "string") {
+          setTailwindPrefix(parsed.tailwindPrefix);
+        }
+        if (parsed.tailwindUnit === "px" || parsed.tailwindUnit === "rem" || parsed.tailwindUnit === "em") {
+          setTailwindUnit(parsed.tailwindUnit);
+        }
+        if (parsed.tailwindColorMode === "var-fallback" || parsed.tailwindColorMode === "var" || parsed.tailwindColorMode === "concrete" || parsed.tailwindColorMode === "hex") {
+          setTailwindColorMode(parsed.tailwindColorMode);
+        }
         if (typeof parsed.githubFilePath === "string") {
           setGithubFilePath(parsed.githubFilePath);
         }
@@ -198,6 +228,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
         useRowColumnPos,
         useTailwindFormat,
         useDSCGFormat,
+        tailwindOutput,
+        tailwindPrefix,
+        tailwindUnit,
+        tailwindColorMode,
         githubFilePath,
       };
       parent.postMessage(
@@ -220,6 +254,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
     useRowColumnPos,
     useTailwindFormat,
     useDSCGFormat,
+    tailwindOutput,
+    tailwindPrefix,
+    tailwindUnit,
+    tailwindColorMode,
     githubFilePath,
     storageKey,
   ]);
@@ -272,6 +310,14 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
       setUseTailwindFormat,
       useDSCGFormat,
       setUseDSCGFormat,
+      tailwindOutput,
+      setTailwindOutput,
+      tailwindPrefix,
+      setTailwindPrefix,
+      tailwindUnit,
+      setTailwindUnit,
+      tailwindColorMode,
+      setTailwindColorMode,
       githubFilePath,
       setGithubFilePath,
     }),
@@ -284,6 +330,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
       useRowColumnPos,
       useTailwindFormat,
       useDSCGFormat,
+      tailwindOutput,
+      tailwindPrefix,
+      tailwindUnit,
+      tailwindColorMode,
       githubFilePath,
       toggleMode,
       toggleCollection,

@@ -23,7 +23,6 @@ export const ExportJS: React.FC<ExportJSProps> = ({ editorType = "" }) => {
         setFilename,
         exportedData,
         canExport,
-        handleSelectToCopy,
         handleDownload
     } = useExportData({ format });
 
@@ -55,7 +54,6 @@ export const ExportJS: React.FC<ExportJSProps> = ({ editorType = "" }) => {
         <OutputPreview 
             exportedData={exportedData}
             editorType={editorType}
-            onSelectToCopy={handleSelectToCopy}
         />
     ) : null;
 

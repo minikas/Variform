@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { RadioGroup } from "figma-kit";
-import { OutputFormats } from "../types.d";
+import { OutputFormats, TailwindOutput } from "../types.d";
 import { PluginDialogShell } from "../components/PluginDialogShell";
 import { ExportHeader } from "../components/ExportHeader";
 import { SectionAccordion } from "../components/SectionAccordion";
@@ -28,6 +28,8 @@ const formatLabel = (format: OutputFormats): string => {
             return "CSV";
         case OutputFormats.CSS:
             return "CSS";
+        case OutputFormats.TAILWIND:
+            return "Tailwind";
         case OutputFormats.TS:
             return "TypeScript";
         default:
@@ -50,11 +52,19 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
         setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
+        tailwindOutput,
+        setTailwindOutput,
+        tailwindPrefix,
+        setTailwindPrefix,
+        tailwindUnit,
+        setTailwindUnit,
+        tailwindColorMode,
+        setTailwindColorMode,
+        effectiveFormat,
         exportedData,
         setExportedData,
         canExport,
         isExporting,
-        handleSelectToCopy,
         handleDownload
     } = useExportData({ format });
 
@@ -106,6 +116,10 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                         <RadioGroup.Item value={OutputFormats.CSS} />
                         CSS
                     </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.TAILWIND} />
+                        Tailwind
+                    </RadioGroup.Label>
                 </RadioGroup.Root>
             </SectionAccordion>
 
@@ -114,10 +128,17 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                 useRowColumnPos={useRowColumnPos}
                 useTailwindFormat={useTailwindFormat}
                 useDSCGFormat={useDSCGFormat}
+                tailwindOutput={tailwindOutput}
+                tailwindPrefix={tailwindPrefix}
+                tailwindUnit={tailwindUnit}
+                tailwindColorMode={tailwindColorMode}
                 filename={filename}
                 onUseRowColumnPosChange={setUseRowColumnPos}
                 onUseTailwindFormatChange={setUseTailwindFormat}
                 onUseDSCGFormatChange={setUseDSCGFormat}
+                onTailwindPrefixChange={setTailwindPrefix}
+                onTailwindUnitChange={setTailwindUnit}
+                onTailwindColorModeChange={setTailwindColorMode}
                 onFilenameChange={setFilename}
             />
 
@@ -127,7 +148,7 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                 canExport={canExport}
                 exportedData={exportedData}
                 filename={filename}
-                fileFormat={format}
+                fileFormat={effectiveFormat}
                 onDownload={handleDownload}
             />
         </>
@@ -139,7 +160,14 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
         <OutputPreview
             exportedData={exportedData}
             editorType={editorType}
-            onSelectToCopy={handleSelectToCopy}
+            previewOptions={format === OutputFormats.TAILWIND ? [
+                { value: "css", label: `${filename}.css` },
+                { value: "preset", label: `${filename}.js` },
+            ] : undefined}
+            previewOptionValue={format === OutputFormats.TAILWIND ? tailwindOutput : undefined}
+            onPreviewOptionChange={format === OutputFormats.TAILWIND
+                ? (value) => setTailwindOutput(value as TailwindOutput)
+                : undefined}
         />
     ) : null;
 

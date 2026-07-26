@@ -1,22 +1,37 @@
 import React, { useState } from "react";
-import { Flex, Text, Button } from "figma-kit";
+import { Flex, Text, Button, Select, Input } from "figma-kit";
 import { copyToClipboard } from "../utils/clipboard";
+
+interface PreviewOption {
+    value: string;
+    label: string;
+}
 
 interface OutputPreviewProps {
     exportedData: string;
     editorType?: string;
-    onSelectToCopy: () => void;
+    /**
+     * Optional outputs the preview can switch between (e.g. the Tailwind
+     * format's CSS and preset files). Rendered as a dropdown in the actions row.
+     */
+    previewOptions?: PreviewOption[];
+    previewOptionValue?: string;
+    onPreviewOptionChange?: (value: string) => void;
 }
 
 /**
- * Code preview component with select-to-copy functionality
+ * Code preview component with copy-to-clipboard and search-to-filter
+ * functionality
  */
 export const OutputPreview: React.FC<OutputPreviewProps> = ({ 
     exportedData, 
     editorType = 'dev',
-    onSelectToCopy 
+    previewOptions,
+    previewOptionValue,
+    onPreviewOptionChange
 }) => {
     const [copyStatus, setCopyStatus] = useState<'idle' | 'success' | 'error'>('idle');
+    const [search, setSearch] = useState<string>("");
 
     const handleCopy = async () => {
         try {
@@ -36,8 +51,15 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
 
     // In design mode the preview sits beside the form, so we cap its height to
     // the viewport and let only the code area scroll — the title and the
-    // copy/select buttons stay put.
+    // copy/search actions stay put.
     const isDesign = editorType === 'figma';
+
+    // The search filters the displayed lines only; Copy always copies the full
+    // export.
+    const query = search.trim().toLowerCase();
+    const displayedData = query
+        ? exportedData.split('\n').filter((line) => line.toLowerCase().includes(query)).join('\n')
+        : exportedData;
 
     return (
         <Flex
@@ -53,7 +75,45 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
                 minHeight: 0,
             }}
         >
-            <Text>Code Preview</Text>
+            <Flex justify="between" align="center" gap="2">
+                <Text>Code Preview</Text>
+                <Flex direction="row" gap="2" align="center">
+                    {previewOptions && previewOptions.length > 0 && (
+                        <Select.Root
+                            value={previewOptionValue}
+                            onValueChange={onPreviewOptionChange}
+                        >
+                            <Select.Trigger
+                                id="varvar-preview-output"
+                                aria-label="Preview output"
+                            />
+                            <Select.Content portal>
+                                {previewOptions.map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    )}
+                    <Button
+                        variant="secondary"
+                        onClick={handleCopy}
+                        disabled={copyStatus !== 'idle'}
+                    >
+                        {copyStatus === 'success' ? '✓ Copied!' :
+                         copyStatus === 'error' ? '✗ Failed' : 'Copy'}
+                    </Button>
+                    <Input
+                        id="varvar-preview-search"
+                        aria-label="Search in the exported output"
+                        placeholder="Search"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        style={{ width: "140px" }}
+                    />
+                </Flex>
+            </Flex>
             <Flex
                 direction="column"
                 gap="2"
@@ -68,54 +128,24 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
                     overflow: isDesign ? 'hidden' : undefined,
                 }}
             >
-                <Flex direction="column" style={{ flex: isDesign ? 1 : undefined, minHeight: isDesign ? 0 : undefined }}>
-                    <Flex
-                        direction="row"
-                        gap="2"
-                        style={{
-                            alignSelf: 'end',
-                            position: 'sticky',
-                            top: 4,
-                            right: 4,
-                            zIndex: 1,
-                            backdropFilter: 'blur(4px)'
-                        }}
+                <div
+                    className="varvar-scroll-thin"
+                    style={{
+                        maxWidth: '100%',
+                        flex: isDesign ? 1 : undefined,
+                        minHeight: isDesign ? 0 : undefined,
+                        overflow: 'auto',
+                    }}
+                >
+                    <pre
+                        id="varvar-exported-output"
+                        style={{ margin: 0, whiteSpace: 'pre', color: 'var(--figma-color-text)' }}
+                        contentEditable
+                        spellCheck="false"
                     >
-                        <Button
-                            variant="secondary"
-                            onClick={handleCopy}
-                            disabled={copyStatus !== 'idle'}
-                        >
-                            {copyStatus === 'success' ? '✓ Copied!' :
-                             copyStatus === 'error' ? '✗ Failed' : 'Copy'}
-                        </Button>
-                        <Button
-                            variant="secondary"
-                            onClick={onSelectToCopy}
-                        >
-                            Select Result
-                        </Button>
-                    </Flex>
-                    <div
-                        className="varvar-scroll-thin"
-                        style={{
-                            marginTop: '-2rem',
-                            maxWidth: '100%',
-                            flex: isDesign ? 1 : undefined,
-                            minHeight: isDesign ? 0 : undefined,
-                            overflow: 'auto',
-                        }}
-                    >
-                        <pre
-                            id="varvar-exported-output"
-                            style={{ margin: 0, whiteSpace: 'pre', color: 'var(--figma-color-text)' }}
-                            contentEditable
-                            spellCheck="false"
-                        >
-                            {exportedData.toString()}
-                        </pre>
-                    </div>
-                </Flex>
+                        {displayedData.toString()}
+                    </pre>
+                </div>
             </Flex>
         </Flex>
     );

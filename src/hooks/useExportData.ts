@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { OutputFormats } from "../types.d";
+import { OutputFormats, TailwindOutput, TailwindUnit, TailwindColorMode } from "../types.d";
 import { useSelection } from "../contexts/SelectionContext";
 import { hasAnySelection } from "../utils/selectionState";
 import { anyStyleSelected } from "../utils/styleSelection";
@@ -20,12 +20,21 @@ interface UseExportDataReturn {
     setUseTailwindFormat: (useTailwindFormat: boolean) => void;
     useDSCGFormat: boolean;
     setUseDSCGFormat: (useDSCGFormat: boolean) => void;
+    tailwindOutput: TailwindOutput;
+    setTailwindOutput: (tailwindOutput: TailwindOutput) => void;
+    tailwindPrefix: string;
+    setTailwindPrefix: (tailwindPrefix: string) => void;
+    tailwindUnit: TailwindUnit;
+    setTailwindUnit: (tailwindUnit: TailwindUnit) => void;
+    tailwindColorMode: TailwindColorMode;
+    setTailwindColorMode: (tailwindColorMode: TailwindColorMode) => void;
+    /** Format used as file extension (Tailwind resolves to css/js per output). */
+    effectiveFormat: OutputFormats;
     exportedData: string;
     setExportedData: (data: string) => void;
     canExport: boolean;
     /** True while an export is in flight (used to show a loading skeleton). */
     isExporting: boolean;
-    handleSelectToCopy: () => void;
     handleDownload: () => void;
 }
 
@@ -55,6 +64,14 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
+        tailwindOutput,
+        setTailwindOutput,
+        tailwindPrefix,
+        setTailwindPrefix,
+        tailwindUnit,
+        setTailwindUnit,
+        tailwindColorMode,
+        setTailwindColorMode,
     } = useSelection();
 
     // Send the selection only once it has been initialised (collections loaded);
@@ -75,23 +92,15 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
                 useLinkedVarRowAndColPos: format === OutputFormats.CSV ? useRowColumnPos : false,
                 useTailwindFormat: format === OutputFormats.CSS ? useTailwindFormat : false,
                 useDSCGFormat: format === OutputFormats.JSON ? useDSCGFormat : false,
+                tailwindOutput: format === OutputFormats.TAILWIND ? tailwindOutput : undefined,
+                tailwindPrefix: format === OutputFormats.TAILWIND ? tailwindPrefix : undefined,
+                tailwindUnit: format === OutputFormats.TAILWIND ? tailwindUnit : undefined,
+                tailwindColorMode: format === OutputFormats.TAILWIND ? tailwindColorMode : undefined,
                 selection: exportSelection,
                 styleSelection,
                 parserId
             }
         }, "*");
-    };
-
-    const handleSelectToCopy = () => {
-        if (exportedData) {
-            const textArea = document.querySelector('#varvar-exported-output');
-            const selection = document.getSelection();
-            if (textArea && selection) {
-                selection.selectAllChildren(textArea);
-            } else {
-                console.warn('Unable to select all code.');
-            }
-        }
     };
 
     const downloadFile = (data: string, fileFormat: string, fileName: string) => {
@@ -104,9 +113,14 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         URL.revokeObjectURL(url);
     };
 
+    // The Tailwind format downloads as .css or .js depending on the chosen output.
+    const effectiveFormat = format === OutputFormats.TAILWIND
+        ? (tailwindOutput === "preset" ? OutputFormats.JS : OutputFormats.CSS)
+        : format;
+
     const handleDownload = () => {
         if (exportedData) {
-            downloadFile(exportedData, format, filename);
+            downloadFile(exportedData, effectiveFormat, filename);
         }
     };
 
@@ -133,7 +147,7 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setIsExporting(true);
         const handle = setTimeout(() => handleExport(), EXPORT_DEBOUNCE_MS);
         return () => clearTimeout(handle);
-    }, [format, useRowColumnPos, useTailwindFormat, useDSCGFormat, selection, styleSelection, parserId]);
+    }, [format, useRowColumnPos, useTailwindFormat, useDSCGFormat, tailwindOutput, tailwindPrefix, tailwindUnit, tailwindColorMode, selection, styleSelection, parserId]);
 
     // Request basic info on mount (only if not already received)
     useEffect(() => {
@@ -151,11 +165,19 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
+        tailwindOutput,
+        setTailwindOutput,
+        tailwindPrefix,
+        setTailwindPrefix,
+        tailwindUnit,
+        setTailwindUnit,
+        tailwindColorMode,
+        setTailwindColorMode,
+        effectiveFormat,
         exportedData,
         setExportedData,
         canExport,
         isExporting,
-        handleSelectToCopy,
         handleDownload
     };
 };
