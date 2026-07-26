@@ -64,19 +64,39 @@ function makeFigmaMock() {
     resolvedType: "FLOAT",
     valuesByMode: { M1: 16 },
   };
-  const collection = {
+  const surfaceCard = {
+    name: "Surface/Card",
+    resolvedType: "COLOR",
+    valuesByMode: {
+      L: { r: 1, g: 1, b: 1, a: 1 },
+      D: { r: 0, g: 0, b: 0, a: 1 },
+      C: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+    },
+  };
+  const primitives = {
     id: "c1",
     name: "Primitives",
     modes: [{ name: "Mode 1", modeId: "M1" }],
     variableIds: ["blue500", "spacing4"],
   };
-  const vars: Record<string, any> = { blue500, spacing4 };
+  const tokens = {
+    id: "c2",
+    name: "Tokens",
+    modes: [
+      { name: "Light", modeId: "L" },
+      { name: "Dark", modeId: "D" },
+      { name: "Contrast", modeId: "C" },
+    ],
+    variableIds: ["surfaceCard"],
+  };
+  const vars: Record<string, any> = { blue500, spacing4, surfaceCard };
+  const collections: Record<string, any> = { c1: primitives, c2: tokens };
 
   return {
     variables: {
-      getLocalVariableCollectionsAsync: async () => [collection],
+      getLocalVariableCollectionsAsync: async () => [primitives, tokens],
       getVariableByIdAsync: async (id: string) => vars[id] ?? null,
-      getVariableCollectionByIdAsync: async () => collection,
+      getVariableCollectionByIdAsync: async (id: string) => collections[id] ?? null,
     },
   };
 }
@@ -106,5 +126,39 @@ describe("exportToTailwind — prefix option", () => {
 
     const rem = await exportToTailwind(undefined, { text: false, paint: false, effect: false, grid: false }, "", "rem");
     expect(rem).toContain("--spacing-spacing--4: 1rem;");
+  });
+});
+
+describe("exportToTailwind — modes (light/dark/themes)", () => {
+  afterEach(() => {
+    delete (globalThis as any).figma;
+  });
+
+  const NO_STYLES = { text: false, paint: false, effect: false, grid: false };
+
+  it("puts Light/Default values in @theme and Dark values in a media query", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwind(undefined, NO_STYLES);
+
+    const [beforeMedia, ...mediaRest] = result.split("@media (prefers-color-scheme: dark)");
+    expect(mediaRest.length).toBe(1);
+
+    // Light value is the @theme default; the dark value only appears inside
+    // the media query (never overriding the default in @theme).
+    expect(beforeMedia).toContain("--color-surface--card: rgb(255 255 255 / 1);");
+    expect(beforeMedia).not.toContain("rgb(0 0 0 / 1)");
+    expect(mediaRest[0]).toContain("--color-surface--card: rgb(0 0 0 / 1);");
+  });
+
+  it("scopes other modes to [data-theme] blocks with a matching @custom-variant", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwind(undefined, NO_STYLES);
+
+    expect(result).toContain('[data-theme="Contrast"] {');
+    expect(result).toContain("--color-surface--card: rgb(128 128 128 / 1);");
+    expect(result).toContain('@custom-variant theme-contrast (&:where([data-theme="Contrast"] *));');
+    // Themed value must not leak into the @theme defaults.
+    const themeBlock = result.split("@media")[0].split("[data-theme]")[0];
+    expect(themeBlock).not.toContain("rgb(128 128 128 / 1)");
   });
 });

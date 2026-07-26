@@ -124,16 +124,20 @@ export function transformToTailwindName(name: string, resolvedType: string, pref
  * @param collection - The variable collection to process
  * @param selection - Optional export selection used to filter the modes
  * @param prefix - Optional prefix inserted after the category segment
- * @returns Object containing theme variables and custom variants
+ * @param unit - Length unit for px-valued tokens
+ * @returns Object containing default theme variables, dark-mode variables,
+ *   per-theme override blocks and custom variants
  */
 async function processCollection(
     collection: VariableCollection,
     selection?: ExportSelection,
     prefix: string = "",
     unit: TailwindUnit = "px"
-): Promise<{ theme: string[], variants: string[] }> {
+): Promise<{ theme: string[], dark: string[], themeBlocks: string[], variants: string[] }> {
     const { variableIds } = collection;
     const themeVars: string[] = [];
+    const darkVars: string[] = [];
+    const themeBlocks: string[] = [];
     const customVariants: string[] = [];
     const validTypes = new Set(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
 
@@ -179,23 +183,29 @@ async function processCollection(
             }
         }
 
-        const isRoot = (mode.name === 'Default' || mode.name === 'Mode 1');
-        if(isRoot) {
+        // Classify modes: Light/Default/Mode 1 are the @theme defaults, Dark
+        // goes into a prefers-color-scheme media query, anything else becomes
+        // a [data-theme] override block plus a matching @custom-variant.
+        const normalizedMode = mode.name.trim().toLowerCase();
+        const isRoot = normalizedMode === 'default' || normalizedMode === 'mode 1' || normalizedMode === 'light';
+        const isDark = normalizedMode === 'dark';
+
+        if (isRoot) {
             themeVars.push(...cssVars);
         }
+        else if (isDark) {
+            darkVars.push(...cssVars);
+        }
         else {
-            // Create custom variant for non-default modes
             const variantName = `theme-${toCssVar(mode.name)}`;
             const selector = `&:where([data-theme="${mode.name}"] *)`;
             customVariants.push(`@custom-variant ${variantName} (${selector});`);
-
-            // Add mode-specific variables to theme block
-            themeVars.push(...cssVars);
+            themeBlocks.push(`[data-theme="${mode.name}"] {\n${cssVars.join('\n')}\n}`);
         }
         cssVars = [];
     }
 
-    return { theme: themeVars, variants: customVariants };
+    return { theme: themeVars, dark: darkVars, themeBlocks, variants: customVariants };
 }
 
 /**
@@ -203,7 +213,9 @@ async function processCollection(
  * @param selection - Optional export selection (omit to export everything)
  * @param styleSelection - Which local style kinds to append (default all)
  * @param prefix - Optional prefix inserted after the category segment
- * @returns Tailwind CSS string with @theme directive and @custom-variant directives
+ * @param unit - Length unit for px-valued tokens
+ * @returns Tailwind CSS string with @theme directive, dark-mode media query,
+ *   per-theme override blocks and @custom-variant directives
  */
 export const exportToTailwind = async (
     selection?: ExportSelection,
@@ -214,12 +226,16 @@ export const exportToTailwind = async (
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
     try {
         const themeVars = new Set<string>();  // Use Set to avoid duplicates
+        const darkVars = new Set<string>();   // "Dark" mode vars → media query
+        const themeBlocks: string[] = [];     // Other modes → [data-theme] blocks
         const customVariants: string[] = [];
 
         for(const collection of collections) {
             if (!isCollectionSelected(collection.id, selection)) continue;
-            const { theme, variants } = await processCollection(collection, selection, prefix, unit);
+            const { theme, dark, themeBlocks: blocks, variants } = await processCollection(collection, selection, prefix, unit);
             theme.forEach(v => themeVars.add(v));
+            dark.forEach(v => darkVars.add(v));
+            themeBlocks.push(...blocks);
             customVariants.push(...variants);
         }
 
@@ -232,8 +248,15 @@ export const exportToTailwind = async (
         // Create @theme block with all variables and styles
         const themeBlock = `@theme {\n${Array.from(themeVars).join('\n')}\n}`;
 
-        // Combine theme and custom variants
-        const result = [themeBlock, ...customVariants].join('\n\n');
+        // Emit "Dark" mode values inside a prefers-color-scheme media query so
+        // they override the @theme defaults automatically (unlayered CSS beats
+        // Tailwind's theme layer). Each var line is indented one extra level.
+        const darkBlock = darkVars.size > 0
+            ? `@media (prefers-color-scheme: dark) {\n  :root {\n${Array.from(darkVars).map(v => `  ${v}`).join('\n')}\n  }\n}`
+            : null;
+
+        // Combine theme, dark-mode overrides, per-theme blocks and variants
+        const result = [themeBlock, ...(darkBlock ? [darkBlock] : []), ...themeBlocks, ...customVariants].join('\n\n');
 
         return result;
     } catch (err) {
