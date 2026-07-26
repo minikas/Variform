@@ -20,7 +20,7 @@ describe("dscgTypeFromResolvedType", () => {
   it("maps Figma types to DTCG types", () => {
     expect(dscgTypeFromResolvedType("COLOR")).toBe("color");
     expect(dscgTypeFromResolvedType("FLOAT")).toBe("number");
-    expect(dscgTypeFromResolvedType("STRING")).toBe("text");
+    expect(dscgTypeFromResolvedType("STRING")).toBe("string");
     expect(dscgTypeFromResolvedType("BOOLEAN")).toBe("boolean");
   });
 });
@@ -35,10 +35,12 @@ describe("toDscgReference", () => {
 });
 
 describe("formatDscgValue", () => {
-  it("formats colors as hex / hex8", () => {
-    expect(formatDscgValue("COLOR", { r: 1, g: 1, b: 1, a: 1 } as RGBA)).toBe(
-      "#ffffff"
-    );
+  it("formats colors as DTCG 2025.10 color objects", () => {
+    expect(formatDscgValue("COLOR", { r: 1, g: 1, b: 1, a: 1 } as RGBA)).toEqual({
+      colorSpace: "srgb",
+      components: [1, 1, 1],
+      hex: "#ffffff",
+    });
     expect(
       formatDscgValue("COLOR", {
         r: 191 / 255,
@@ -46,7 +48,12 @@ describe("formatDscgValue", () => {
         b: 244 / 255,
         a: 0.8,
       } as RGBA)
-    ).toBe("#bfcdf4cc");
+    ).toEqual({
+      colorSpace: "srgb",
+      components: [191 / 255, 205 / 255, 244 / 255],
+      alpha: 0.8,
+      hex: "#bfcdf4",
+    });
   });
 
   it("rounds floats to a number, stringifies booleans, passes strings", () => {
@@ -121,9 +128,9 @@ describe("setNestedToken", () => {
 
   it("trims whitespace around path segments", () => {
     const root: Record<string, any> = {};
-    setNestedToken(root, "Font Family / Prompt", { $type: "text", $value: "Prompt" });
+    setNestedToken(root, "Font Family / Prompt", { $type: "string", $value: "Prompt" });
     expect(root).toEqual({
-      "Font Family": { Prompt: { $type: "text", $value: "Prompt" } },
+      "Font Family": { Prompt: { $type: "string", $value: "Prompt" } },
     });
   });
 });
@@ -261,8 +268,8 @@ describe("textStyleToTypographyToken", () => {
       $value: {
         fontFamily: "Inter",
         fontWeight: 700,
-        fontSize: "32px",
-        letterSpacing: "0px",
+        fontSize: { value: 32, unit: "px" },
+        letterSpacing: { value: 0, unit: "px" },
         lineHeight: 1.2,
       },
       $extensions: {
@@ -291,8 +298,8 @@ describe("textStyleToTypographyToken", () => {
       $value: {
         fontFamily: "Inter",
         fontWeight: 400,
-        fontSize: "16px",
-        letterSpacing: "0em",
+        fontSize: { value: 16, unit: "px" },
+        letterSpacing: { value: 0, unit: "px" },
       },
     });
   });
@@ -306,7 +313,7 @@ describe("paintStyleToColorToken", () => {
     } as unknown as PaintStyle;
     expect(paintStyleToColorToken(style)).toEqual({
       $type: "color",
-      $value: rgbToHex8({ r: 0, g: 0, b: 1, a: 1 }),
+      $value: { colorSpace: "srgb", components: [0, 0, 1], hex: "#0000ff" },
     });
   });
 
@@ -337,11 +344,11 @@ describe("effectStyleToShadowToken", () => {
     expect(effectStyleToShadowToken(style)).toEqual({
       $type: "shadow",
       $value: {
-        color: rgbToHex8({ r: 0, g: 0, b: 0, a: 0.25 }),
-        offsetX: "0px",
-        offsetY: "2px",
-        blur: "4px",
-        spread: "0px",
+        color: { colorSpace: "srgb", components: [0, 0, 0], alpha: 0.25, hex: "#000000" },
+        offsetX: { value: 0, unit: "px" },
+        offsetY: { value: 2, unit: "px" },
+        blur: { value: 4, unit: "px" },
+        spread: { value: 0, unit: "px" },
         inset: false,
       },
     });
@@ -394,7 +401,10 @@ describe("exportToDSCG — local styles", () => {
     const result = JSON.parse((await exportToDSCG()) as string);
 
     expect(result.Styles.typography.Heading.H1.$type).toBe("typography");
-    expect(result.Styles.color.Brand.Primary).toEqual({ $type: "color", $value: "#0000ff" });
+    expect(result.Styles.color.Brand.Primary).toEqual({
+      $type: "color",
+      $value: { colorSpace: "srgb", components: [0, 0, 1], hex: "#0000ff" },
+    });
     expect(result.Styles.shadow.Elevation.Low.$type).toBe("shadow");
     expect(result.$metadata.tokenSetOrder).toContain("Styles");
   });
@@ -442,7 +452,7 @@ describe("exportToDSCG (end-to-end with a Figma mock)", () => {
     }
   });
 
-  it("emits $extensions (scopes when set + hiddenFromPublishing), mapped types, hex/hex8 colors and {refs}", async () => {
+  it("emits $extensions (scopes when set + hiddenFromPublishing), mapped types, 2025.10 color objects and {refs}", async () => {
     (globalThis as any).figma = makeFigmaMock();
 
     const result = JSON.parse((await exportToDSCG()) as string);
@@ -451,16 +461,21 @@ describe("exportToDSCG (end-to-end with a Figma mock)", () => {
     expect(result["Colour Primitives/Light"].Grayscale.White).toEqual({
       $extensions: { "com.figma.hiddenFromPublishing": false },
       $type: "color",
-      $value: "#ffffff",
+      $value: { colorSpace: "srgb", components: [1, 1, 1], hex: "#ffffff" },
     });
-    // non-empty scopes -> scopes first, then hiddenFromPublishing; alpha -> hex8
+    // non-empty scopes -> scopes first, then hiddenFromPublishing; alpha field
     expect(result["Colour Primitives/Light"].Gradient.Blue.XS).toEqual({
       $extensions: {
         "com.figma.scopes": ["EFFECT_COLOR"],
         "com.figma.hiddenFromPublishing": false,
       },
       $type: "color",
-      $value: "#bfcdf4cc",
+      $value: {
+        colorSpace: "srgb",
+        components: [191 / 255, 205 / 255, 244 / 255],
+        alpha: 0.8,
+        hex: "#bfcdf4",
+      },
     });
     // alias -> {ref}
     expect(result["Colour Usage/Mode 1"].Background.Brand.Bold_01).toEqual({
@@ -486,7 +501,7 @@ describe("exportToDSCG (end-to-end with a Figma mock)", () => {
         "com.figma.scopes": ["ALL_SCOPES"],
         "com.figma.hiddenFromPublishing": false,
       },
-      $type: "text",
+      $type: "string",
       $value: "Regular",
     });
   });

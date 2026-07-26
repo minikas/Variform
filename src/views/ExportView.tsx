@@ -109,6 +109,10 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                         JavaScript
                     </RadioGroup.Label>
                     <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.TS} />
+                        TypeScript
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
                         <RadioGroup.Item value={OutputFormats.CSV} />
                         CSV
                     </RadioGroup.Label>

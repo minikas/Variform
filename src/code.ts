@@ -7,6 +7,7 @@ import { exportToCSS } from "./utils/collectionToCSS";
 import { exportToTailwind } from "./utils/collectionToTailwind";
 import { exportToTailwindPreset } from "./utils/collectionToTailwindPreset";
 import { exportToJS } from "./utils/collectionToJS";
+import { exportToTS } from "./utils/collectionToTS";
 import { OutputFormats, MessageTypes, PluginCommands, PluginMessage, CollectionMeta, ExportSelection, StyleSelection, TailwindOutput, TailwindUnit, TailwindColorMode } from "./types.d";
 import { ALL_STYLES } from "./utils/styleSelection";
 import { rgbToCssColor } from "./utils/color";
@@ -82,6 +83,9 @@ async function handleExport(
                 break;
             case OutputFormats.JS:
                 data = await exportToJS(selection, styleSelection, parserId) || '';
+                break;
+            case OutputFormats.TS:
+                data = await exportToTS(selection, styleSelection, parserId) || '';
                 break;
             case OutputFormats.CSS:
                 data = useTailwindFormat ? await exportToTailwind(selection, styleSelection) : await exportToCSS(selection, styleSelection);

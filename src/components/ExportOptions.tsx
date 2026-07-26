@@ -53,10 +53,11 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
     const showTailwindFormatOptions = format === OutputFormats.TAILWIND;
 
     // The description parser applies to the formats that emit the description as
-    // data: JSON (non-DSCG), JavaScript and CSV.
+    // data: JSON (non-DSCG), JavaScript, TypeScript and CSV.
     const showParser =
         (format === OutputFormats.JSON && !useDSCGFormat) ||
         format === OutputFormats.JS ||
+        format === OutputFormats.TS ||
         format === OutputFormats.CSV;
 
     // The Tailwind format downloads as .css or .js depending on the output.

@@ -31,6 +31,18 @@ export const rgbToCssColor = ({ r, g, b, a = 1 }: RGBA): CssColor => {
 };
 
 /**
+ * Converts an RGB color to a 6-digit hex string (alpha is ignored — the DTCG
+ * color object carries it in a separate `alpha` field).
+ * @param {RGB} param0 - The RGB color to convert
+ * @returns {string} The hex string (`#rrggbb`)
+ */
+export const rgbToHex = ({ r, g, b }: RGB): string => {
+  const toHex = (value: number) =>
+    Math.round(value * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+};
+
+/**
  * Converts an RGBA color to a hex string, appending an 8th/2-digit alpha
  * channel only when the color is not fully opaque, so DSCG output uses the
  * standard DTCG hex color formatting (e.g. `#0326880d`).

@@ -17,7 +17,7 @@ The GitHub sync flow lives next to the download button in every export view:
 
 ## Features
 
-- **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS, JavaScript, or Tailwind (CSS v4 `@theme` stylesheet or v3 preset dictionary)
+- **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS, JavaScript, TypeScript, or Tailwind (CSS v4 `@theme` stylesheet or v3 preset dictionary)
 - **Tailwind Options**: Token prefix, px/rem/em units, and four color modes (CSS-var reference with hex fallback, bare var, concrete rgb, or hex) — remembered per file
 - **Push to GitHub**: Connect a repository, preview a token-level diff, commit on a new branch, and open a pull request — without leaving Figma
 - **Refined UI**: Accordion-based selection, live preview with skeleton loading, inspect modals, and inline diff review before pushing
@@ -165,6 +165,24 @@ Every export view includes **Connect GitHub…** / **Push to GitHub** next to th
 
 > **Security:** Your token is sent only to the configured GitHub host over HTTPS. It is never logged or embedded in exported files.
 
+## Export Formats
+
+- [x] JSON
+- [x] JavaScript
+- [x] TypeScript
+- [x] CSV
+- [x] CSS
+- [x] Tailwind CSS (v4, @theme)
+- [x] Tailwind Preset (v3, theme.extend)
+- [x] DTCG 2025.10
+- [ ] React Native / Expo
+- [ ] Tamagui
+- [ ] SCSS
+- [ ] Style Dictionary JSON
+- [ ] iOS Swift
+- [ ] Android
+- [ ] Flutter
+
 ## Tailwind Export
 
 The **Tailwind** format produces two complementary files, switched from the dropdown in the preview header (the download/push extension follows: `.css` or `.js`):
@@ -186,15 +204,16 @@ The two outputs are designed to work together: preset colors reference the very 
 
 ## DSCG / DTCG Format
 
-When the **Normalize to DSCG** option is enabled for the JSON export, variables are emitted in the [Design Tokens (DTCG)](https://tr.designtokens.org/format/) format, so they can be imported directly as a token set.
+When the **Normalize to DSCG** option is enabled for the JSON export, variables are emitted in the [Design Tokens (DTCG) 2025.10](https://www.designtokens.org/TR/2025.10/format/) format, so they can be imported directly as a token set.
 
 Normalization rules:
 
 - Each **collection + mode** pair becomes a top-level token set named `"${collection}/${mode}"`.
 - Variables are nested by their `/`-delimited name. Each leaf carries `$extensions`, `$type` and `$value` (in that order), matching the DTCG export.
 - `$extensions` holds `com.figma.scopes` (only when the variable has scopes) followed by `com.figma.hiddenFromPublishing`.
-- `$type` is mapped from the Figma resolved type: `COLOR → color`, `FLOAT → number`, `STRING → text`, `BOOLEAN → boolean`.
-- Colors are output as hex, with an 8-digit `#rrggbbaa` value when not fully opaque.
+- `$type` is mapped from the Figma resolved type: `COLOR → color`, `FLOAT → number`, `STRING → string`, `BOOLEAN → boolean` (`string`/`boolean` follow Figma's own DTCG dialect — the 2025.10 spec has no type for them).
+- Colors are 2025.10 color objects: `{ "colorSpace": "srgb", "components": [r, g, b], "alpha": a, "hex": "#rrggbb" }` (`alpha` only when not opaque).
+- Composite style tokens (typography, shadow) use 2025.10 dimension objects (`{ "value": 32, "unit": "px" }`) for lengths; percent letter-spacing is converted to exact px via the font size.
 - Linked variables become `{Group.path}` references (e.g. `{Brand.500 - P}`).
 - The file ends with `$themes` and `$metadata.tokenSetOrder` so the consuming tool can resolve set ordering.
 
@@ -207,7 +226,11 @@ Example output:
       "500 - P": {
         "$extensions": { "com.figma.hiddenFromPublishing": false },
         "$type": "color",
-        "$value": "#043ad1"
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.01568627450980392, 0.22745098039215686, 0.8196078431372549],
+          "hex": "#043ad1"
+        }
       }
     }
   },

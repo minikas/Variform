@@ -1,13 +1,13 @@
-import { rgbToHex8 } from "./color";
+import { rgbToHex } from "./color";
 import { isCollectionSelected, selectedModes } from "./selectionUtils";
 import { getLocalStyles, filterStyles } from "./styleSerializers";
-import { fontWeightFromStyle, isItalicStyle, letterSpacingToCss } from "./styleConversion";
+import { fontWeightFromStyle, isItalicStyle } from "./styleConversion";
 import { ALL_STYLES, anyStyleSelected } from "./styleSelection";
 import type { ExportSelection, StyleSelection } from "../types.d";
 
 /**
  * Converts Figma variable collections into the DTCG (Design Tokens
- * Community Group) format, a.k.a. "DSCG".
+ * Community Group) 2025.10 format, a.k.a. "DSCG".
  *
  * Shape of the output (single object, not an array):
  *  - Each `collection` + `mode` pair becomes a top-level token set named
@@ -16,8 +16,14 @@ import type { ExportSelection, StyleSelection } from "../types.d";
  *  - Each leaf carries `$extensions`, `$type` and `$value` (in that order).
  *    `$extensions` holds `com.figma.scopes` (when the variable has scopes) and
  *    `com.figma.hiddenFromPublishing`.
+ *  - Colors are 2025.10 color objects (`colorSpace`/`components`/`alpha`/`hex`)
+ *    and lengths in composite tokens are dimension objects (`value`/`unit`).
  *  - Aliases (linked variables) become `{dot.path}` references.
  *  - The file ends with `$themes: []` and `$metadata.tokenSetOrder`.
+ *
+ * Known deviations: Figma STRING/BOOLEAN variables map to the `string` and
+ * `boolean` types (Figma's own DTCG dialect — the 2025.10 spec has no type
+ * for them), and FLOAT variables stay `number` (Figma floats carry no unit).
  */
 
 const VALID_TYPES = new Set<VariableResolvedDataType>([
@@ -31,9 +37,23 @@ export type DscgTokenType =
   | "color"
   | "number"
   | "boolean"
-  | "text"
+  | "string"
   | "typography"
   | "shadow";
+
+/** DTCG 2025.10 color value (srgb). */
+export interface DtcgColor {
+  colorSpace: "srgb";
+  components: [number, number, number];
+  alpha?: number;
+  hex: string;
+}
+
+/** DTCG 2025.10 dimension value. */
+export interface DtcgDimension {
+  value: number;
+  unit: "px" | "rem";
+}
 
 export interface DscgFigmaExtensions {
   "com.figma.scopes"?: VariableScope[];
@@ -66,11 +86,36 @@ export function dscgTypeFromResolvedType(
     case "BOOLEAN":
       return "boolean";
     case "STRING":
-      return "text";
+      return "string";
     case "FLOAT":
     default:
       return "number";
   }
+}
+
+/**
+ * Converts an RGBA color to the DTCG 2025.10 color object (srgb color space,
+ * 0–1 components, optional alpha, hex fallback).
+ * @param rgba - The RGBA color to convert
+ * @returns The DTCG color object
+ */
+export function rgbaToDtcgColor({ r, g, b, a = 1 }: RGBA): DtcgColor {
+  return {
+    colorSpace: "srgb",
+    components: [r, g, b],
+    ...(a !== 1 ? { alpha: a } : {}),
+    hex: rgbToHex({ r, g, b }),
+  };
+}
+
+/**
+ * Builds a DTCG 2025.10 dimension object, rounded to 3 decimals.
+ * @param value - The numeric value
+ * @param unit - The unit (only `px`/`rem` exist in the spec)
+ * @returns The DTCG dimension object
+ */
+export function toDtcgDimension(value: number, unit: "px" | "rem" = "px"): DtcgDimension {
+  return { value: Number(value.toFixed(3)), unit };
 }
 
 /**
@@ -91,10 +136,10 @@ export function toDscgReference(variableName: string): string {
 export function formatDscgValue(
   resolvedType: VariableResolvedDataType,
   value: Exclude<VariableValue, VariableAlias>
-): string | number {
+): unknown {
   switch (resolvedType) {
     case "COLOR":
-      return rgbToHex8(value as RGBA);
+      return rgbaToDtcgColor(value as RGBA);
     case "FLOAT":
       return Number((value as number).toFixed(3));
     case "BOOLEAN":
@@ -178,7 +223,7 @@ async function buildTokenSet(
     const value: VariableValue = valuesByMode[mode.modeId];
     if (value === undefined) continue;
 
-    let resolvedValue: string | number;
+    let resolvedValue: unknown;
     if (
       typeof value === "object" &&
       value !== null &&
@@ -229,11 +274,18 @@ export function lineHeightToRatio(
 
 /** Maps a Figma text style to a DTCG `typography` composite token. */
 export function textStyleToTypographyToken(style: TextStyle): DscgToken {
+  // 2025.10 typography sub-values: fontSize/letterSpacing are dimension
+  // objects. Percent letter-spacing is converted to exact px via the font size
+  // (the spec's dimension units are only px/rem — em would be wrong).
+  const letterSpacingPx = style.letterSpacing.unit === "PERCENT"
+    ? (style.letterSpacing.value / 100) * style.fontSize
+    : style.letterSpacing.value;
+
   const value: Record<string, unknown> = {
     fontFamily: style.fontName.family,
     fontWeight: fontWeightFromStyle(style.fontName.style),
-    fontSize: `${style.fontSize}px`,
-    letterSpacing: letterSpacingToCss(style.letterSpacing),
+    fontSize: toDtcgDimension(style.fontSize),
+    letterSpacing: toDtcgDimension(letterSpacingPx),
   };
   const ratio = lineHeightToRatio(style.lineHeight, style.fontSize);
   if (ratio !== undefined) value.lineHeight = ratio;
@@ -268,7 +320,7 @@ export function paintStyleToColorToken(style: PaintStyle): DscgToken | null {
   const paint = visible[0] as SolidPaint;
   return {
     $type: "color",
-    $value: rgbToHex8({ ...paint.color, a: paint.opacity ?? 1 }),
+    $value: rgbaToDtcgColor({ ...paint.color, a: paint.opacity ?? 1 }),
   };
 }
 
@@ -286,11 +338,11 @@ export function effectStyleToShadowToken(style: EffectStyle): DscgToken | null {
   if (shadows.length === 0) return null;
 
   const toShadow = (effect: DropShadowEffect | InnerShadowEffect) => ({
-    color: rgbToHex8(effect.color),
-    offsetX: `${effect.offset.x}px`,
-    offsetY: `${effect.offset.y}px`,
-    blur: `${effect.radius}px`,
-    spread: `${"spread" in effect && effect.spread ? effect.spread : 0}px`,
+    color: rgbaToDtcgColor(effect.color),
+    offsetX: toDtcgDimension(effect.offset.x),
+    offsetY: toDtcgDimension(effect.offset.y),
+    blur: toDtcgDimension(effect.radius),
+    spread: toDtcgDimension("spread" in effect && effect.spread ? effect.spread : 0),
     inset: effect.type === "INNER_SHADOW",
   });
 
