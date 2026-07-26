@@ -1,7 +1,7 @@
 import { collectThemedTokens } from "./collectionToTailwindPreset";
 import type { FlatToken } from "./collectionToTailwindPreset";
-import { rgbaToArgbHex } from "./collectionToAndroid";
-import { toCamelCase } from "./stringTransformation";
+import { rgbaToArgbHex } from "./color";
+import { toCamelCase, toAsciiIdentifier } from "./stringTransformation";
 import type { ExportSelection } from "../types.d";
 
 /** Maps a token's resolved type to its Dart field type. */
@@ -16,15 +16,42 @@ function dartType(token: FlatToken): string {
 
 /**
  * Builds the Dart field name for a token: camelCase of the category plus
- * the path segments (["colors"]+["blue","500"] → colorsBlue500).
+ * the path segments (["colors"]+["blue","500"] → colorsBlue500). ASCII-only
+ * because Dart identifiers are ASCII-only: accented or punctuation-heavy
+ * Figma names ("Cores/Ação", "4 (compact)") would not compile otherwise.
  */
 function tokenName(token: FlatToken): string {
-    return toCamelCase([token.category, ...token.path].join("-"));
+    return toAsciiIdentifier([token.category, ...token.path].join("-"));
 }
 
-/** Formats a number as a Dart double literal, always with a decimal (16.0, 0.5). */
+/**
+ * Derives a unique field name per token: collisions (e.g. "Colors/Blue 500"
+ * and "Colors/Blue-500" both camelCase to colorsBlue500) get a numeric suffix
+ * so the generated class never declares the same field twice.
+ */
+function uniqueTokenNames(tokens: FlatToken[]): string[] {
+    const used = new Set<string>();
+    return tokens.map((token) => {
+        const base = tokenName(token);
+        let unique = base;
+        let suffix = 2;
+        while (used.has(unique)) unique = `${base}${suffix++}`;
+        if (unique !== base) {
+            console.warn(`Flutter export: duplicate token name "${base}" (${token.terminalName}) emitted as "${unique}"`);
+        }
+        used.add(unique);
+        return unique;
+    });
+}
+
+/**
+ * Formats a number as a Dart double literal, always with a decimal (16.0,
+ * 0.5). Very large/small magnitudes stringify in exponential notation
+ * ("1e+21"), which is already a valid Dart literal and must not get a ".0".
+ */
 function dartDouble(n: number): string {
-    return Number.isInteger(n) ? `${n}.0` : `${n}`;
+    const s = `${n}`;
+    return /[.eE]/.test(s) ? s : `${s}.0`;
 }
 
 /** Formats a concrete token value as a Dart expression. */
@@ -37,12 +64,15 @@ function dartValue(token: FlatToken): string {
         case "BOOLEAN":
             return Boolean(token.value) ? "true" : "false";
         default:
-            // Dart single-quoted strings still interpolate `$`, and an
-            // unescaped backslash can form invalid escape sequences.
+            // Dart single-quoted strings still interpolate `$`, an unescaped
+            // backslash can form invalid escape sequences, and a literal line
+            // break terminates the string literal.
             return `'${String(token.value)
                 .replace(/\\/g, "\\\\")
                 .replace(/'/g, "\\'")
-                .replace(/\$/g, "\\$")}'`;
+                .replace(/\$/g, "\\$")
+                .replace(/\n/g, "\\n")
+                .replace(/\r/g, "\\r")}'`;
     }
 }
 
@@ -105,29 +135,32 @@ export const exportToFlutter = async (
         const names = instanceNames(themes.map((theme) => theme.mode));
         const hasDoubles = defaultTokens.some((token) => token.resolvedType === "FLOAT");
 
-        const field = (token: FlatToken) => tokenName(token);
+        const fieldNames = uniqueTokenNames(defaultTokens);
         const lines: string[] = [`class Tokens extends ThemeExtension<Tokens> {`];
         if (defaultTokens.length > 0) {
             lines.push(`    const Tokens({`);
-            lines.push(...defaultTokens.map((token) => `        required this.${field(token)},`));
+            lines.push(...fieldNames.map((name) => `        required this.${name},`));
             lines.push(`    });`, ``);
-            lines.push(...defaultTokens.map((token) => `    final ${dartType(token)} ${field(token)};`));
+            lines.push(...defaultTokens.map((token, index) => `    final ${dartType(token)} ${fieldNames[index]};`));
         } else {
             lines.push(`    const Tokens();`);
         }
 
         themes.forEach((theme, index) => {
+            // Same variables as the default theme in the same order, so this
+            // yields the field names declared above, suffixes included.
+            const themeFields = uniqueTokenNames(theme.tokens);
             lines.push(``, `    static const Tokens ${names[index]} = Tokens(`);
-            lines.push(...theme.tokens.map((token) => `        ${field(token)}: ${dartValue(token)},`));
+            lines.push(...theme.tokens.map((token, tokenIndex) => `        ${themeFields[tokenIndex]}: ${dartValue(token)},`));
             lines.push(`    );`);
         });
 
         lines.push(``, `    @override`);
         if (defaultTokens.length > 0) {
             lines.push(`    Tokens copyWith({`);
-            lines.push(...defaultTokens.map((token) => `        ${dartType(token)}? ${field(token)},`));
+            lines.push(...defaultTokens.map((token, index) => `        ${dartType(token)}? ${fieldNames[index]},`));
             lines.push(`    }) {`, `        return Tokens(`);
-            lines.push(...defaultTokens.map((token) => `            ${field(token)}: ${field(token)} ?? this.${field(token)},`));
+            lines.push(...fieldNames.map((name) => `            ${name}: ${name} ?? this.${name},`));
             lines.push(`        );`, `    }`);
         } else {
             lines.push(`    Tokens copyWith() => this;`);
@@ -137,7 +170,7 @@ export const exportToFlutter = async (
         lines.push(`        if (other is! Tokens) return this;`);
         if (defaultTokens.length > 0) {
             lines.push(`        return Tokens(`);
-            lines.push(...defaultTokens.map((token) => `            ${field(token)}: ${lerpExpression(token, field(token))},`));
+            lines.push(...defaultTokens.map((token, index) => `            ${fieldNames[index]}: ${lerpExpression(token, fieldNames[index])},`));
             lines.push(`        );`);
         } else {
             lines.push(`        return this;`);
@@ -154,13 +187,14 @@ export const exportToFlutter = async (
 
         return [
             "// Flutter tokens generated by Variform.",
+            ...(usedModes.length > 0 ? [`// Modes: ${usedModes.join("; ")}`] : []),
             "// Custom tokens follow Flutter's documented theming mechanism: a",
             "// ThemeExtension subclass attached to ThemeData",
             "// (https://api.flutter.dev/flutter/material/ThemeExtension-class.html),",
             "// with one static const instance per selected mode (aliases resolved).",
             "// Wire the modes per https://docs.flutter.dev/cookbook/design/themes:",
             ...usage,
-            `// Access a token: Theme.of(context).extension<Tokens>()!.${defaultTokens.length > 0 ? field(defaultTokens[0]) : "<token>"}`,
+            `// Access a token: Theme.of(context).extension<Tokens>()!.${defaultTokens.length > 0 ? fieldNames[0] : "<token>"}`,
             `import 'package:flutter/material.dart';`,
             ...(hasDoubles ? [`import 'dart:ui' show lerpDouble;`] : []),
             "",

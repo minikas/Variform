@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   dscgTypeFromResolvedType,
   toDscgReference,
@@ -31,6 +31,10 @@ describe("toDscgReference", () => {
     expect(toDscgReference("Background/Neutral/Primary")).toBe(
       "{Background.Neutral.Primary}"
     );
+  });
+
+  it("trims whitespace around path segments (matching setNestedToken)", () => {
+    expect(toDscgReference("Font Family / Prompt")).toBe("{Font Family.Prompt}");
   });
 });
 
@@ -133,6 +137,29 @@ describe("setNestedToken", () => {
     expect(root).toEqual({
       "Font Family": { Prompt: { $type: "string", $value: "Prompt" } },
     });
+  });
+
+  it("warns and skips when a token already sits at an intermediate segment", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root: Record<string, any> = {};
+    setNestedToken(root, "Color", { $type: "color", $value: "#000000" });
+    setNestedToken(root, "Color/Primary", { $type: "color", $value: "#ffffff" });
+
+    expect(root.Color).toEqual({ $type: "color", $value: "#000000" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("warns and skips when a group already sits at the leaf path", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root: Record<string, any> = {};
+    setNestedToken(root, "Color/Primary", { $type: "color", $value: "#ffffff" });
+    setNestedToken(root, "Color", { $type: "color", $value: "#000000" });
+
+    expect(root.Color.Primary).toEqual({ $type: "color", $value: "#ffffff" });
+    expect(root.Color.$value).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 });
 
@@ -531,5 +558,105 @@ describe("exportToDSCG (end-to-end with a Figma mock)", () => {
 
     const raw = (await exportToDSCG()) as string;
     expect(raw).not.toContain("import(");
+  });
+});
+
+describe("exportToDSCG — audit regressions", () => {
+  afterEach(() => {
+    delete (globalThis as any).figma;
+    vi.restoreAllMocks();
+  });
+
+  const stylesless = {
+    getLocalTextStylesAsync: async () => [],
+    getLocalPaintStylesAsync: async () => [],
+    getLocalEffectStylesAsync: async () => [],
+    getLocalGridStylesAsync: async () => [],
+  };
+
+  it("downgrades a broken alias (_unlinked) to the string type", async () => {
+    (globalThis as any).figma = {
+      ...stylesless,
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          { id: "c1", name: "Col", modes: [{ name: "Mode 1", modeId: "m" }], variableIds: ["broken"] },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          id === "broken"
+            ? {
+                name: "Background/Broken",
+                resolvedType: "COLOR",
+                valuesByMode: { m: { type: "VARIABLE_ALIAS", id: "missing" } },
+                scopes: [],
+                hiddenFromPublishing: false,
+              }
+            : null,
+      },
+    };
+
+    const result = JSON.parse((await exportToDSCG()) as string);
+
+    expect(result["Col/Mode 1"].Background.Broken.$type).toBe("string");
+    expect(result["Col/Mode 1"].Background.Broken.$value).toBe("_unlinked");
+  });
+
+  it("trims alias references to variables with spaces around the '/'", async () => {
+    const vars: Record<string, any> = {
+      ff: {
+        name: "Font Family / Prompt",
+        resolvedType: "STRING",
+        valuesByMode: { m: "Prompt" },
+        scopes: [],
+        hiddenFromPublishing: false,
+        variableCollectionId: "c1",
+      },
+      alias: {
+        name: "Alias/Body",
+        resolvedType: "STRING",
+        valuesByMode: { m: { type: "VARIABLE_ALIAS", id: "ff" } },
+        scopes: [],
+        hiddenFromPublishing: false,
+        variableCollectionId: "c1",
+      },
+    };
+    (globalThis as any).figma = {
+      ...stylesless,
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          { id: "c1", name: "Col", modes: [{ name: "Mode 1", modeId: "m" }], variableIds: ["ff", "alias"] },
+        ],
+        getVariableByIdAsync: async (id: string) => vars[id] ?? null,
+      },
+    };
+
+    const result = JSON.parse((await exportToDSCG()) as string);
+
+    expect(result["Col/Mode 1"]["Font Family"].Prompt.$value).toBe("Prompt");
+    expect(result["Col/Mode 1"].Alias.Body.$value).toBe("{Font Family.Prompt}");
+  });
+
+  it("suffixes duplicate token set names instead of overwriting them", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const vars: Record<string, any> = {
+      a: { name: "a", resolvedType: "FLOAT", valuesByMode: { m: 1 }, scopes: [], hiddenFromPublishing: false },
+      b: { name: "b", resolvedType: "FLOAT", valuesByMode: { m: 2 }, scopes: [], hiddenFromPublishing: false },
+    };
+    (globalThis as any).figma = {
+      ...stylesless,
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          { id: "c1", name: "Col", modes: [{ name: "Mode", modeId: "m" }], variableIds: ["a"] },
+          { id: "c2", name: "Col", modes: [{ name: "Mode", modeId: "m" }], variableIds: ["b"] },
+        ],
+        getVariableByIdAsync: async (id: string) => vars[id] ?? null,
+      },
+    };
+
+    const result = JSON.parse((await exportToDSCG()) as string);
+
+    expect(result["Col/Mode"].a.$value).toBe(1);
+    expect(result["Col/Mode (2)"].b.$value).toBe(2);
+    expect(result.$metadata.tokenSetOrder).toEqual(["Col/Mode", "Col/Mode (2)"]);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

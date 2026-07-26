@@ -1,5 +1,22 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { exportToFlutter } from "./collectionToFlutter";
+import { toAsciiIdentifier } from "./stringTransformation";
+
+describe("toAsciiIdentifier", () => {
+  it("strips diacritics and treats punctuation as word separators", () => {
+    expect(toAsciiIdentifier("colors-ação")).toBe("colorsAcao");
+    expect(toAsciiIdentifier("spacing-4 (compact)")).toBe("spacing4Compact");
+    expect(toAsciiIdentifier("colors-blue-500")).toBe("colorsBlue500");
+  });
+
+  it("keeps inner capitalization of camelCase segments", () => {
+    expect(toAsciiIdentifier("fontFamily-sans")).toBe("fontFamilySans");
+  });
+
+  it("never returns an empty identifier", () => {
+    expect(toAsciiIdentifier("!!!")).toBe("token");
+  });
+});
 
 function makeFigmaMock() {
   const collection = {
@@ -96,8 +113,8 @@ describe("exportToFlutter", () => {
     expect(result).toContain("final Color colorsBlue500;");
     expect(result).toContain("final Color colorsOverlayDim;");
     expect(result).toContain("final double spacing4;");
-    // "Font Size/Body" categorizes as spacing (the 'size' heuristic wins over 'font').
-    expect(result).toContain("final double spacingFontSizeBody;");
+    // "Font Size/Body" categorizes as fontSize (the typography branch wins over 'size').
+    expect(result).toContain("final double fontSizeBody;");
     expect(result).toContain("final String fontFamilySans;");
     // "Background/Primary" categorizes as colors (the 'background' keyword).
     expect(result).toContain("final Color colorsBackgroundPrimary;");
@@ -202,5 +219,193 @@ describe("exportToFlutter", () => {
     // No FLOAT tokens here, so the dart:ui import is omitted.
     expect(result).not.toContain("dart:ui");
     expect(result).not.toContain("import(");
+  });
+
+  it("escapes newlines and carriage returns in string values", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["label"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          id === "label"
+            ? {
+                name: "Font Family/Label",
+                resolvedType: "STRING",
+                variableCollectionId: "c1",
+                valuesByMode: { L: "first\nsecond\r\nthird" },
+              }
+            : null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToFlutter();
+
+    // A literal line break would terminate the Dart string literal.
+    expect(result).toContain("fontFamilyLabel: 'first\\nsecond\\r\\nthird',");
+    expect(result).not.toContain("first\nsecond");
+  });
+
+  it("keeps exponential notation for very large FLOATs (no dangling .0)", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["huge"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          id === "huge"
+            ? {
+                name: "Spacing/Huge",
+                resolvedType: "FLOAT",
+                variableCollectionId: "c1",
+                valuesByMode: { L: 1e21 },
+              }
+            : null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToFlutter();
+
+    // Number.isInteger(1e21) is true, so the old check emitted "1e+21.0",
+    // which is not a valid Dart literal.
+    expect(result).toContain("spacingHuge: 1e+21,");
+    expect(result).not.toContain("1e+21.0");
+  });
+
+  it("sanitizes accented and punctuation-heavy names to ASCII identifiers", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["acao", "compact"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            acao: {
+              name: "Colors/Ação",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 1, g: 0, b: 0, a: 1 } },
+            },
+            compact: {
+              name: "Spacing/4 (compact)",
+              resolvedType: "FLOAT",
+              variableCollectionId: "c1",
+              valuesByMode: { L: 8 },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToFlutter();
+
+    // Dart identifiers are ASCII-only: "colorsAção" would not compile.
+    expect(result).toContain("final Color colorsAcao;");
+    expect(result).toContain("final double spacing4Compact;");
+    expect(result).toContain("colorsAcao: Color(0xFFFF0000),");
+    expect(result).toContain("spacing4Compact: 8.0,");
+    expect(result).not.toContain("Ação");
+    expect(result).not.toContain("(compact)");
+  });
+
+  it("suffixes duplicate field names so the class compiles", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["a", "b"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            a: {
+              name: "Colors/Blue 500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 1, a: 1 } },
+            },
+            b: {
+              name: "Colors/Blue-500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 0.5, a: 1 } },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToFlutter();
+
+    // Both names camelCase to colorsBlue500; the second gets a numeric suffix
+    // in the declarations AND in the const instance (no duplicate named arg).
+    expect(result).toContain("final Color colorsBlue500;");
+    expect(result).toContain("final Color colorsBlue5002;");
+    expect(result).toContain("colorsBlue500: Color(0xFF0000FF),");
+    expect(result).toContain("colorsBlue5002: Color(0xFF000080),");
+    expect(result).toContain("colorsBlue5002: colorsBlue5002 ?? this.colorsBlue5002,");
+  });
+
+  it("suffixes colliding mode instance names (Dark Mode / Dark-Mode)", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [
+              { name: "Light", modeId: "L" },
+              { name: "Dark Mode", modeId: "DM" },
+              { name: "Dark-Mode", modeId: "DM2" },
+            ],
+            variableIds: ["blue"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          id === "blue"
+            ? {
+                name: "Colors/Blue",
+                resolvedType: "COLOR",
+                variableCollectionId: "c1",
+                valuesByMode: {
+                  L: { r: 0, g: 0, b: 1, a: 1 },
+                  DM: { r: 0, g: 0, b: 0.2, a: 1 },
+                  DM2: { r: 0, g: 0, b: 0.1, a: 1 },
+                },
+              }
+            : null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToFlutter();
+
+    // Both mode names camelCase to darkMode; the second instance is suffixed
+    // so every static const stays addressable.
+    expect(result).toContain("static const Tokens darkMode = Tokens(");
+    expect(result).toContain("static const Tokens darkMode2 = Tokens(");
+    expect(result.match(/static const Tokens darkMode = Tokens\(/g)?.length).toBe(1);
+  });
+
+  it("lists the used modes in the header", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToFlutter();
+
+    expect(result).toContain("// Modes: Primitives → Light");
   });
 });

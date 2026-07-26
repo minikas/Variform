@@ -76,23 +76,24 @@ async function handleExport(
     tailwindOutput: TailwindOutput = "css",
     tailwindPrefix: string = "",
     tailwindUnit: TailwindUnit = "px",
-    tailwindColorMode: TailwindColorMode = "var-fallback"
+    tailwindColorMode: TailwindColorMode = "var-fallback",
+    requestId?: string
 ) {
     try {
-        let data: string;
+        let data: string | null | undefined;
 
         switch (format) {
             case OutputFormats.CSV:
-                data = await exportToCSV(useLinkedVarRowAndColPos, selection, styleSelection, parserId) || '';
+                data = await exportToCSV(useLinkedVarRowAndColPos, selection, styleSelection, parserId);
                 break;
             case OutputFormats.JSON:
-                data = useDSCGFormat ? await exportToDSCG(selection, styleSelection) || '' : await exportToJSON(selection, styleSelection, parserId) || '';
+                data = useDSCGFormat ? await exportToDSCG(selection, styleSelection) : await exportToJSON(selection, styleSelection, parserId);
                 break;
             case OutputFormats.JS:
-                data = await exportToJS(selection, styleSelection, parserId) || '';
+                data = await exportToJS(selection, styleSelection, parserId);
                 break;
             case OutputFormats.TS:
-                data = await exportToTS(selection, styleSelection, parserId) || '';
+                data = await exportToTS(selection, styleSelection, parserId);
                 break;
             case OutputFormats.CSS:
                 data = useTailwindFormat ? await exportToTailwind(selection, styleSelection) : await exportToCSS(selection, styleSelection);
@@ -127,10 +128,20 @@ async function handleExport(
                 throw new Error(`Unsupported format: ${format}`);
         }
 
+        // Some exporters catch their own errors and resolve to null/undefined.
+        // Forwarding that as a successful (empty) result would show a blank
+        // preview with no error — surface it as an export error instead.
+        if (data === null || data === undefined) {
+            throw new Error(`Export produced no data for format "${format}".`);
+        }
+
         figma.ui.postMessage({
             type: MessageTypes.EXPORT_SUCCESS_RESULT,
             format,
             data,
+            // Echoed so the UI can discard late responses to superseded
+            // export requests (see useExportData).
+            requestId
         } as PluginMessage);
         // No success toast here: the export auto-runs on every format/option/
         // selection change to refresh the preview, so notifying would spam the
@@ -143,6 +154,8 @@ async function handleExport(
         
         figma.ui.postMessage({
             type: MessageTypes.EXPORT_ERROR,
+            format,
+            requestId,
             error: error instanceof Error ? error.message : 'Unknown error occurred'
         } as PluginMessage);
     }
@@ -283,7 +296,8 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
                     msg.tailwindOutput ?? "css",
                     msg.tailwindPrefix ?? "",
                     msg.tailwindUnit ?? "px",
-                    msg.tailwindColorMode ?? "var-fallback"
+                    msg.tailwindColorMode ?? "var-fallback",
+                    msg.requestId
                 );
             } else {
                 console.error('Export request missing format');

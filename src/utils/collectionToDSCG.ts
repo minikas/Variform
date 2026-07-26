@@ -120,11 +120,13 @@ export function toDtcgDimension(value: number, unit: "px" | "rem" = "px"): DtcgD
 
 /**
  * Formats a (slash-delimited) variable name as a DTCG reference.
+ * Segments are trimmed so the reference matches the trimmed nesting done by
+ * `setNestedToken` (e.g. `Font Family / Prompt` → `{Font Family.Prompt}`).
  * @param variableName - The linked variable's name (e.g. `Brand/500 - P`)
  * @returns The reference token (e.g. `{Brand.500 - P}`)
  */
 export function toDscgReference(variableName: string): string {
-  return `{${variableName.replace(/\//g, ".")}}`;
+  return `{${variableName.split("/").map((part) => part.trim()).join(".")}}`;
 }
 
 /**
@@ -178,6 +180,10 @@ export function buildFigmaExtensions(
  * Inserts a token at its nested path (split on `/`) within a token set.
  * Leaf keys are written in the order `$extensions`, `$type`, `$value` to match
  * the DTCG output shape.
+ *
+ * Collision policy (token "a" vs token "a/b", or duplicate paths): a token is
+ * never mixed with a group and nothing is lost silently — the collision is
+ * logged with console.warn and the later token is skipped.
  * @param setRoot - The token set object to mutate
  * @param variableName - The variable's `/`-delimited name
  * @param token - The DTCG token to insert
@@ -190,10 +196,27 @@ export function setNestedToken(
   const parts = variableName.split("/").map((part) => part.trim());
   let node = setRoot;
 
-  parts.forEach((part) => {
-    node[part] = (node[part] as DscgNode) || {};
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    const existing = node[part] as DscgNode | undefined;
+
+    if (index === parts.length - 1) {
+      if (existing !== undefined) {
+        console.warn(`Token name collision at "${variableName}": a token or group already sits at that path, skipping it.`);
+        return;
+      }
+      node[part] = {};
+      node = node[part] as DscgNode;
+      break;
+    }
+
+    if (existing !== undefined && "$value" in existing) {
+      console.warn(`Token name collision at "${variableName}": a token already sits at "${part}", skipping the nested one.`);
+      return;
+    }
+    node[part] = existing || {};
     node = node[part] as DscgNode;
-  });
+  }
 
   if (token.$extensions) node.$extensions = token.$extensions;
   node.$type = token.$type;
@@ -224,6 +247,7 @@ async function buildTokenSet(
     if (value === undefined) continue;
 
     let resolvedValue: unknown;
+    let tokenType = dscgTypeFromResolvedType(resolvedType);
     if (
       typeof value === "object" &&
       value !== null &&
@@ -232,6 +256,10 @@ async function buildTokenSet(
     ) {
       const linkedVar = await figma.variables.getVariableByIdAsync(value.id);
       resolvedValue = linkedVar ? toDscgReference(linkedVar.name) : "_unlinked";
+      if (!linkedVar) {
+        // A broken alias is a string, not the original resolved type.
+        tokenType = "string";
+      }
     } else {
       resolvedValue = formatDscgValue(
         resolvedType,
@@ -242,7 +270,7 @@ async function buildTokenSet(
     const extensions = buildFigmaExtensions({ scopes, hiddenFromPublishing });
 
     setNestedToken(setRoot, name, {
-      $type: dscgTypeFromResolvedType(resolvedType),
+      $type: tokenType,
       $value: resolvedValue,
       ...(extensions ? { $extensions: extensions } : {}),
     });
@@ -399,7 +427,16 @@ export const exportToDSCG = async (
     for (const collection of collections) {
       if (!isCollectionSelected(collection.id, selection)) continue;
       for (const mode of selectedModes(collection.id, collection.modes, selection)) {
-        const tokenSetName = `${collection.name}/${mode.name}`;
+        // Two same-named collections with a same-named mode would produce the
+        // same set key — suffix the later one instead of silently overwriting.
+        let tokenSetName = `${collection.name}/${mode.name}`;
+        if (tokenSetName in file) {
+          let suffix = 2;
+          while (`${tokenSetName} (${suffix})` in file) suffix++;
+          const uniqueName = `${tokenSetName} (${suffix})`;
+          console.warn(`Duplicate token set name "${tokenSetName}": renaming the later set to "${uniqueName}".`);
+          tokenSetName = uniqueName;
+        }
         file[tokenSetName] = await buildTokenSet(collection, mode);
         tokenSetOrder.push(tokenSetName);
       }

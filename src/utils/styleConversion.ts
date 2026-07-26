@@ -7,18 +7,21 @@ import { rgbToCssColor } from "./color";
  * @returns The numeric CSS font-weight
  */
 export const fontWeightFromStyle = (style: string): number => {
-  const normalized = style.toLowerCase();
+  const normalized = style.toLowerCase().replace(/\s+/g, " ");
   const weights: Array<[string, number]> = [
     ["thin", 100],
     ["extralight", 200],
     ["extra light", 200],
     ["ultralight", 200],
+    ["ultra light", 200],
     ["semibold", 600],
     ["semi bold", 600],
     ["demibold", 600],
+    ["demi bold", 600],
     ["extrabold", 800],
     ["extra bold", 800],
     ["ultrabold", 800],
+    ["ultra bold", 800],
     ["light", 300],
     ["medium", 500],
     ["bold", 700],
@@ -202,7 +205,9 @@ export const paintToCss = (paint: Paint): string | null => {
   }
 
   if (paint.type === "IMAGE") {
-    return "/* image paint — not exportable to CSS */";
+    // Images have no CSS color/gradient equivalent; returning the old
+    // comment string here leaked it into CSS values (`background: #fff, ;`).
+    return null;
   }
 
   return null;
@@ -239,8 +244,9 @@ export const paintsToCss = (paints: readonly Paint[]): PaintCss | null => {
     return { property: "color", value: values[0] };
   }
 
-  // CSS background layers render first-listed on top, so reverse Figma's order.
-  return { property: "background", value: [...values].reverse().join(", ") };
+  // Figma lists paints top-first and CSS background layers render the first
+  // value on top, so the order carries over unchanged (no reversal).
+  return { property: "background", value: values.join(", ") };
 };
 
 /**

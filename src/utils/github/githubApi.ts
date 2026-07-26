@@ -277,7 +277,8 @@ export async function getFileSha(
 }
 
 /**
- * Fetch the raw text of a file on a branch, or `null` when it does not exist.
+ * Fetch the raw text of a file on a branch, or `null` when it does not exist
+ * (or the path resolves to a directory — see below).
  * Uses the raw media type so the body comes back as the file contents directly
  * (rather than the base64-wrapped JSON envelope).
  */
@@ -301,6 +302,14 @@ export async function getFileContent(
   }
   if (!response.ok) {
     throw await toApiError(response);
+  }
+  // The raw media type only applies to files: for a DIRECTORY path GitHub
+  // ignores it and answers 200 with the JSON listing. Treat that like a
+  // missing file instead of diffing against directory JSON (getFileSha does
+  // the equivalent via its array check).
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (contentType.includes("application/json")) {
+    return null;
   }
   return await response.text();
 }
@@ -443,7 +452,20 @@ export async function pushFile(
           `Base branch "${conn.baseBranch}" was not found in ${conn.owner}/${conn.repo}.`,
         );
       }
-      await createBranch(conn, params.branch, baseSha);
+      try {
+        await createBranch(conn, params.branch, baseSha);
+      } catch (error) {
+        // Race: another process created the branch between our existence check
+        // and the create call. A 422 is only safe to ignore if the branch
+        // really exists now — otherwise rethrow (e.g. an invalid base SHA).
+        if (!(error instanceof GitHubApiError) || error.status !== 422) {
+          throw error;
+        }
+        const raced = await getBranchSha(conn, params.branch);
+        if (!raced) {
+          throw error;
+        }
+      }
     }
   }
 

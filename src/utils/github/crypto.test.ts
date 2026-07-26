@@ -25,4 +25,22 @@ describe("crypto", () => {
     expect(a.iv).not.toBe(b.iv);
     expect(a.ciphertext).not.toBe(b.ciphertext);
   });
+
+  it("throws the friendly error (not a raw InvalidCharacterError) on a corrupt salt", async () => {
+    const secret = await encryptSecret("ghp_secret_token", "passphrase");
+    const corrupt = { ...secret, salt: "!!!not-base64!!!" };
+    await expect(decryptSecret(corrupt, "passphrase")).rejects.toThrow(
+      "Incorrect passphrase — could not decrypt the saved token.",
+    );
+  });
+
+  it("throws the friendly error on a corrupt iv or ciphertext", async () => {
+    const secret = await encryptSecret("ghp_secret_token", "passphrase");
+    await expect(
+      decryptSecret({ ...secret, iv: "!!!" }, "passphrase"),
+    ).rejects.toThrow(/passphrase/i);
+    await expect(
+      decryptSecret({ ...secret, ciphertext: "!!!" }, "passphrase"),
+    ).rejects.toThrow(/passphrase/i);
+  });
 });

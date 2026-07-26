@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Dialog, Button, Input, Textarea, Switch, Select, Label, Text, Flex, Link } from "figma-kit";
 import { UseGitHubReturn } from "../../hooks/useGitHub";
 import {
   defaultBranchName,
   defaultCommitMessage,
   defaultPrBody,
-  defaultPrTitle,
 } from "../../utils/github/branchName";
 import { DiffList } from "./DiffList";
 import { useSelection } from "../../contexts/SelectionContext";
@@ -103,15 +102,19 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
 
   // Repositories + branches for the entered token (loaded on "Validate").
+  // The query keys are deliberately token-independent: the PAT must never sit
+  // in the TanStack cache (visible in devtools). The token itself is captured
+  // by the queryFn closure, and handleTokenChange drops the cached data.
+  const queryClient = useQueryClient();
   const reposQuery = useQuery({
-    queryKey: ["github", "repos", token.trim()],
+    queryKey: ["github", "repos"],
     queryFn: () => listRepositories({ token: token.trim() }),
     enabled: false,
   });
   const repos = reposQuery.data ?? null;
   const selectedRepo = repos?.find((item) => item.fullName === selectedRepoFullName);
   const branchesQuery = useQuery({
-    queryKey: ["github", "branches", token.trim(), selectedRepo?.owner, selectedRepo?.repo],
+    queryKey: ["github", "branches", selectedRepo?.owner, selectedRepo?.repo],
     queryFn: () => listBranches({ token: token.trim() }, selectedRepo!.owner, selectedRepo!.repo),
     enabled: Boolean(token.trim() && selectedRepo),
   });
@@ -175,8 +178,11 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
 
   const handleTokenChange = (value: string) => {
     setToken(value);
-    // The repository list is keyed on the token; reset the selection on change.
+    // The repository list is keyed independently of the token; drop the cached
+    // data so a previous token's repos/branches never show for the new one.
     setSelectedRepoFullName("");
+    queryClient.removeQueries({ queryKey: ["github", "repos"] });
+    queryClient.removeQueries({ queryKey: ["github", "branches"] });
   };
 
   const handleSelectRepo = (fullName: string) => {
@@ -225,7 +231,7 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
       commitMessage: message,
       branch: branch.trim(),
       createPr: openPr,
-      prTitle: message || defaultPrTitle(trimmedPath),
+      prTitle: message,
       prBody: defaultPrBody(trimmedPath),
     });
   };
@@ -317,8 +323,14 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
                     {[...repos]
                       .sort((a, b) => a.fullName.localeCompare(b.fullName))
                       .map((item) => (
-                        <Select.Item key={item.fullName} value={item.fullName}>
-                          {item.fullName}
+                        <Select.Item
+                          key={item.fullName}
+                          value={item.fullName}
+                          disabled={!item.canPush}
+                        >
+                          {item.canPush
+                            ? item.fullName
+                            : `${item.fullName} (no push access)`}
                         </Select.Item>
                       ))}
                   </Select.Content>

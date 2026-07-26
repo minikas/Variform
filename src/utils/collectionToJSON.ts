@@ -18,48 +18,79 @@ async function processCollection(
   selection?: ExportSelection,
   parserId?: string
 ): Promise<[]> {
-  const { name, variableIds } = collection;
+  const { name: collectionName, variableIds } = collection;
   const entries: [] = [];
   const validTypes = new Set(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
 
   for(const mode of selectedModes(collection.id, collection.modes, selection)) {
-    const file = { collection: name, mode: mode.name, variables: {} };
+    const file = { collection: collectionName, mode: mode.name, variables: {} };
 
     for (const variableId of variableIds) {
       const figVar = await figma.variables.getVariableByIdAsync(variableId);
       if (figVar !== null) {
-        const { name, resolvedType, valuesByMode, scopes, description }: Variable = figVar;
+        const { name: variableName, resolvedType, valuesByMode, scopes, hiddenFromPublishing, description }: Variable = figVar;
         const value: VariableValue = valuesByMode[mode.modeId];
 
         if (value !== undefined && validTypes.has(resolvedType)) {
+          // Nest by the trimmed `/`-delimited path. Collision policy (leaf vs
+          // group, or duplicate path): a token is never mixed with a group and
+          // nothing is lost silently — warn and skip the colliding variable.
+          const pathParts = variableName.split("/").map((part) => part.trim());
           let obj: any = file.variables;
+          let collides = false;
 
-          name.split("/").forEach((groupName) => {
-            obj[groupName] = obj[groupName] || {};
-            obj = obj[groupName];
-          });
+          for (let index = 0; index < pathParts.length; index++) {
+            const part = pathParts[index];
+            const existing = obj[part];
+
+            if (index === pathParts.length - 1) {
+              if (existing !== undefined) {
+                console.warn(`Variable name collision at "${variableName}": a token or group already sits at that path, skipping it.`);
+                collides = true;
+                break;
+              }
+              obj[part] = {};
+              obj = obj[part];
+            }
+            else {
+              if (existing !== undefined && "$value" in existing) {
+                console.warn(`Variable name collision at "${variableName}": a token already sits at "${part}", skipping the nested one.`);
+                collides = true;
+                break;
+              }
+              obj[part] = existing || {};
+              obj = obj[part];
+            }
+          }
+          if (collides) continue;
+
           const isColor: boolean = resolvedType === "COLOR";
           const isNumber: boolean = resolvedType === "FLOAT";
           const isBool: boolean = resolvedType === "BOOLEAN";
           obj.$type = resolvedType;
           obj.$scopes = scopes;
+          obj.$hiddenFromPublishing = hiddenFromPublishing;
           obj.$description = applyDescriptionParser(description || '', parserId);
           if (typeof value === 'object' && 'type' in value && value.type === 'VARIABLE_ALIAS') {
             const linkedVar = await figma.variables.getVariableByIdAsync(value.id);
 
             if(linkedVar) {
               const linkedVarCollection = await figma.variables.getVariableCollectionByIdAsync(linkedVar.variableCollectionId);
+              // Same-collection aliases use the "$." shorthand; cross-collection
+              // ones name the linked collection explicitly.
               let collName = '$.';
 
-              if(linkedVarCollection && name !== linkedVarCollection.name) {
+              if(linkedVarCollection && collectionName !== linkedVarCollection.name) {
                 collName = `$.${linkedVarCollection.name}`
               }
               const matchedModeName = linkedVarCollection
-                ? getMatchingModeName(mode.name, linkedVarCollection)
+                ? getMatchingModeName(mode.name, linkedVarCollection, selection)
                 : mode.name;
-              obj.$value = `${collName}.${matchedModeName}.${linkedVar.name.replace(/\//g, ".")}`;
+              obj.$value = `${collName}.${matchedModeName}.${linkedVar.name.split("/").map((part) => part.trim()).join(".")}`;
             }
             else {
+              // A broken alias is a string, not the original resolved type.
+              obj.$type = "string";
               obj.$value = "_unlinked"
             }
           }
@@ -67,7 +98,7 @@ async function processCollection(
             obj.$value = isColor
               ? rgbToCssColor(value as RGBA)
               : isNumber
-                ? parseFloat(value as string)
+                ? Number((value as number).toFixed(3))
                   : isBool
                     ? Boolean(value)
                     : String(value);
@@ -92,8 +123,8 @@ export const exportToJSON = async (
   styleSelection: StyleSelection = ALL_STYLES,
   parserId?: string
 ): Promise<string | undefined> => {
-  const collections = await figma.variables.getLocalVariableCollectionsAsync();
   try {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
     const files: any[] = [];
     for( const collection of collections ) {
       if (!isCollectionSelected(collection.id, selection)) continue;

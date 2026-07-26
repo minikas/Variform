@@ -1,5 +1,6 @@
-import type { StyleSelection } from "../types.d";
+import type { StyleSelection, TailwindUnit } from "../types.d";
 import { toCssVar } from "./stringTransformation";
+import { toJsObjectLiteral } from "./jsSerialize";
 import {
   fontWeightFromStyle,
   isItalicStyle,
@@ -77,23 +78,52 @@ interface StyleTokenTrees {
 }
 
 /**
- * Nests a token under a slash-delimited Figma style name within a tree
+ * Nests a token under a slash-delimited Figma style name within a tree.
+ *
+ * Prototype-pollution safe: path segments are always created as OWN
+ * properties (via defineProperty, so `__proto__` never triggers the
+ * prototype setter) and inherited nodes are never reused.
+ *
+ * Collision policy (style "a" vs style "a/b", or duplicate paths): the LAST
+ * token never overwrites or merges into what is already there — a token is
+ * never mixed with a group and no data is silently lost. The collision is
+ * logged with console.warn and the later token is skipped.
  */
 const nestToken = (
   tree: Record<string, any>,
   name: string,
   token: StyleToken
 ): void => {
+  const isTokenNode = (node: unknown): boolean =>
+    typeof node === "object" && node !== null && ("$value" in node || "value" in node);
+
   const parts = name.split("/");
   let cursor = tree;
-  parts.forEach((part, index) => {
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    const existing = Object.prototype.hasOwnProperty.call(cursor, part) ? cursor[part] : undefined;
+
     if (index === parts.length - 1) {
-      cursor[part] = token;
-    } else {
-      cursor[part] = cursor[part] || {};
-      cursor = cursor[part];
+      if (existing !== undefined) {
+        console.warn(`Duplicate style path "${name}": keeping the first token, skipping the later one.`);
+        return;
+      }
+      Object.defineProperty(cursor, part, { value: token, writable: true, enumerable: true, configurable: true });
+      return;
     }
-  });
+
+    if (existing !== undefined && (typeof existing !== "object" || existing === null || isTokenNode(existing))) {
+      console.warn(`Style name collision at "${name}": a token already sits at "${part}", skipping the nested one.`);
+      return;
+    }
+    if (existing === undefined) {
+      const node: Record<string, any> = {};
+      Object.defineProperty(cursor, part, { value: node, writable: true, enumerable: true, configurable: true });
+      cursor = node;
+    } else {
+      cursor = existing;
+    }
+  }
 };
 
 const buildTextTree = (textStyles: TextStyle[]): Record<string, any> => {
@@ -183,8 +213,32 @@ export const buildStyleTokenTrees = (styles: LocalStyles): StyleTokenTrees => ({
 /* CSS fragments                                                              */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Neutralizes sequences that would break out of a CSS comment (a star-slash
+ * pair closes the comment early; `<!--` can confuse HTML parsers when the
+ * CSS is inlined). Safe to interpolate inside a comment afterwards.
+ * @param text - The raw text (e.g. a Figma style description)
+ * @returns The sanitized text
+ */
+export const sanitizeCssComment = (text: string): string =>
+  text.replace(/\*\//g, "* /").replace(/<!--/g, "< !--");
+
+/**
+ * Sanitizes a Figma style name into a valid CSS class name (without the
+ * leading dot): lowercases and kebab-cases via toCssVar, strips characters
+ * outside [a-z0-9_-] and prefixes a leading digit with `_` (e.g. "24px/Body"
+ * → "_24px--body"). Exported so the CSS/Tailwind serializers share it.
+ * @param name - The Figma style name
+ * @returns A valid CSS class name
+ */
+export const toCssClassName = (name: string): string => {
+  const sanitized = toCssVar(name).replace(/[^a-z0-9_-]/g, "");
+  if (sanitized.length === 0) return "_";
+  return /^[0-9]/.test(sanitized) ? `_${sanitized}` : sanitized;
+};
+
 const descriptionComment = (description: string): string =>
-  description ? `\t/* ${description} */` : "";
+  description ? `\t/* ${sanitizeCssComment(description)} */` : "";
 
 const textStylesToCss = (textStyles: TextStyle[]): string[] =>
   textStyles.map((style) => {
@@ -217,8 +271,8 @@ const textStylesToCss = (textStyles: TextStyle[]): string[] =>
       declarations.push(`  margin-bottom: ${style.paragraphSpacing}px;`);
     }
 
-    const selector = `.${toCssVar(style.name)}`;
-    const comment = style.description ? `/* ${style.description} */\n` : "";
+    const selector = `.${toCssClassName(style.name)}`;
+    const comment = style.description ? `/* ${sanitizeCssComment(style.description)} */\n` : "";
     return `${comment}${selector} {\n${declarations.join("\n")}\n}`;
   });
 
@@ -311,7 +365,11 @@ export const stylesToCssFragments = (styles: LocalStyles): StylesCssFragments =>
 /* CSV rows (variables schema: Collection,Mode,Variable,Type,Value,Scopes,Description) */
 /* -------------------------------------------------------------------------- */
 
-const csvCell = (value: string | number): string =>
+/**
+ * Escapes a single CSV cell: always double-quoted, inner quotes doubled.
+ * Exported so the variables CSV serializer shares the same escaping.
+ */
+export const csvCell = (value: string | number): string =>
   `"${String(value).replace(/"/g, '""')}"`;
 
 const csvRow = (
@@ -435,25 +493,35 @@ export const stylesToInspectRows = (styles: LocalStyles): string[][] => {
  * valid JS identifiers (style names with spaces or digits stay quoted).
  */
 const toExportStatement = (name: string, tree: Record<string, any>): string => {
-  const body = JSON.stringify(tree, null, 2).replace(
-    /"([A-Za-z_$][A-Za-z0-9_$]*)":/g,
-    "$1:"
-  );
-  return `export const ${name} = ${body};`;
+  return `export const ${name} = ${toJsObjectLiteral(tree)};`;
 };
+
+/** Base names of the consts emitted by {@link stylesToJsStatements}. */
+export const STYLE_CONST_NAMES = ["textStyles", "paintStyles", "effectStyles", "gridStyles"] as const;
 
 /**
  * Converts local Figma styles into JavaScript export statements, one per
  * non-empty style kind, for appending to the variables JS output.
  * @param styles - The local styles bundle
+ * @param reservedNames - Const names already taken in the target module
+ *   (e.g. by variable collections); collisions get a numeric suffix
+ *   (`textStyles2`, ...)
  * @returns A JS string with one exported const per non-empty style kind
  */
-export const stylesToJsStatements = (styles: LocalStyles): string => {
+export const stylesToJsStatements = (styles: LocalStyles, reservedNames?: Set<string>): string => {
   const trees = buildStyleTokenTrees(styles);
+  const used = new Set(reservedNames);
 
   return (Object.keys(trees) as Array<keyof StyleTokenTrees>)
     .filter((key) => Object.keys(trees[key]).length > 0)
-    .map((key) => toExportStatement(key, trees[key]))
+    .map((key) => {
+      let name: string = key;
+      for (let suffix = 2; used.has(name); suffix++) {
+        name = `${key}${suffix}`;
+      }
+      used.add(name);
+      return toExportStatement(name, trees[key]);
+    })
     .join("\n\n");
 };
 
@@ -461,26 +529,47 @@ export const stylesToJsStatements = (styles: LocalStyles): string => {
 /* Tailwind v4 @theme tokens                                                  */
 /* -------------------------------------------------------------------------- */
 
-const textTokens = (textStyles: TextStyle[]): string[] =>
+/**
+ * Formats a px length in the chosen unit (rem/em are converted from a 16px
+ * base). Local copy of formatTailwindLength — importing it from
+ * collectionToTailwind would create a circular module dependency.
+ */
+const formatStyleLength = (value: number, unit: TailwindUnit): string => {
+  if (unit === "px") return `${value}px`;
+  return `${parseFloat((value / 16).toFixed(4))}${unit}`;
+};
+
+const textTokens = (textStyles: TextStyle[], unit: TailwindUnit): string[] =>
   textStyles.flatMap((style) => {
     const name = toCssVar(style.name);
+    // Percent/auto line-heights and em letter-spacing are already relative;
+    // only px lengths are converted to the chosen unit.
+    const lineHeight =
+      unit !== "px" && style.lineHeight.unit === "PIXELS"
+        ? formatStyleLength(style.lineHeight.value, unit)
+        : lineHeightToCss(style.lineHeight);
+    const letterSpacing =
+      unit !== "px" && style.letterSpacing.unit === "PIXELS"
+        ? formatStyleLength(style.letterSpacing.value, unit)
+        : letterSpacingToCss(style.letterSpacing);
     return [
-      `  --text-${name}: ${style.fontSize}px;`,
-      `  --text-${name}--line-height: ${lineHeightToCss(style.lineHeight)};`,
+      `  --text-${name}: ${formatStyleLength(style.fontSize, unit)};`,
+      `  --text-${name}--line-height: ${lineHeight};`,
       `  --text-${name}--font-weight: ${fontWeightFromStyle(style.fontName.style)};`,
-      `  --text-${name}--letter-spacing: ${letterSpacingToCss(style.letterSpacing)};`,
+      `  --text-${name}--letter-spacing: ${letterSpacing};`,
     ];
   });
 
-const paintTokens = (paintStyles: PaintStyle[]): string[] =>
+const paintTokens = (paintStyles: PaintStyle[], prefix: string): string[] =>
   paintStyles
     .map((style) => {
       const css = paintsToCss(style.paints);
       if (!css) {
         return null;
       }
-      const prefix = css.property === "color" ? "color" : "gradient";
-      return `  --${prefix}-${toCssVar(style.name)}: ${css.value};`;
+      const category = css.property === "color" ? "color" : "gradient";
+      const prefixSegment = prefix ? `${toCssVar(prefix)}-` : "";
+      return `  --${category}-${prefixSegment}${toCssVar(style.name)}: ${css.value};`;
     })
     .filter((line): line is string => line !== null);
 
@@ -497,12 +586,27 @@ const effectTokens = (effectStyles: EffectStyle[]): string[] =>
 
 /**
  * Converts local Figma styles into Tailwind v4 `@theme` token lines, for
- * merging into the variables Tailwind output.
+ * merging into the variables Tailwind output. Grid styles have no @theme
+ * equivalent, so they are documented in a comment block (same as the CSS
+ * export) — this keeps the grid toggle meaningful instead of a no-op.
  * @param styles - The local styles bundle
+ * @param prefix - Optional prefix inserted after the category segment
+ * @param unit - Length unit for px-valued tokens (rem/em use a 16px base)
  * @returns Theme token declaration lines
  */
-export const stylesToTailwindTokens = (styles: LocalStyles): string[] => [
-  ...paintTokens(styles.paint),
-  ...textTokens(styles.text),
-  ...effectTokens(styles.effect),
-];
+export const stylesToTailwindTokens = (
+  styles: LocalStyles,
+  prefix: string = "",
+  unit: TailwindUnit = "px"
+): string[] => {
+  const lines = [
+    ...paintTokens(styles.paint, prefix),
+    ...textTokens(styles.text, unit),
+    ...effectTokens(styles.effect),
+  ];
+  const gridComment = gridStylesToComment(styles.grid);
+  if (gridComment) {
+    lines.push(gridComment);
+  }
+  return lines;
+};

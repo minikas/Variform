@@ -1,9 +1,40 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   tailwindPresetKey,
   tokenPath,
+  setNestedPath,
+  collectThemedTokens,
   exportToTailwindPreset,
 } from "./collectionToTailwindPreset";
+
+/* ------------------------------ setNestedPath ---------------------------- */
+
+describe("setNestedPath", () => {
+  it("creates own properties for __proto__ segments without polluting Object.prototype", () => {
+    const root: Record<string, any> = {};
+    setNestedPath(root, ["colors", "__proto__", "polluted"], "yes");
+
+    expect((Object.prototype as any).polluted).toBeUndefined();
+    expect(JSON.stringify(root)).toBe('{"colors":{"__proto__":{"polluted":"yes"}}}');
+  });
+
+  it("never reuses the inherited constructor/prototype nodes", () => {
+    const root: Record<string, any> = {};
+    setNestedPath(root, ["constructor", "x"], 1);
+    setNestedPath(root, ["a", "prototype", "y"], 2);
+
+    expect(JSON.stringify(root)).toBe('{"constructor":{"x":1},"a":{"prototype":{"y":2}}}');
+    expect((Object as any).x).toBeUndefined();
+  });
+
+  it("replaces a leaf when a longer path needs a group at the same key", () => {
+    const root: Record<string, any> = {};
+    setNestedPath(root, ["a"], "leaf");
+    setNestedPath(root, ["a", "b"], 2);
+
+    expect(JSON.stringify(root)).toBe('{"a":{"b":2}}');
+  });
+});
 
 /* ----------------------------- pure functions ---------------------------- */
 
@@ -49,7 +80,7 @@ function makeFigmaMock() {
     id: "c1",
     name: "Primitives",
     modes: [{ name: "Mode 1", modeId: "M1" }],
-    variableIds: ["blue500", "spacing4", "weightBold", "familySans", "radiusSm"],
+    variableIds: ["blue500", "spacing4", "weightBold", "familySans", "radiusSm", "lineTight", "flagOn"],
   };
   const tokens = {
     id: "c2",
@@ -58,7 +89,18 @@ function makeFigmaMock() {
       { name: "Light", modeId: "L" },
       { name: "Dark", modeId: "D" },
     ],
-    variableIds: ["bgPrimary", "surfaceCard", "overlayDim", "broken"],
+    variableIds: ["bgPrimary", "surfaceCard", "overlayDim", "broken", "accentRef", "lightOnly"],
+  };
+  // Modes deliberately differ in case from the Tokens collection ("Dark" vs
+  // "DARK") to exercise case-insensitive mode matching through aliases.
+  const accents = {
+    id: "c3",
+    name: "Accents",
+    modes: [
+      { name: "light", modeId: "l3" },
+      { name: "DARK", modeId: "d3" },
+    ],
+    variableIds: ["accent"],
   };
 
   const vars: Record<string, any> = {
@@ -91,6 +133,18 @@ function makeFigmaMock() {
       resolvedType: "FLOAT",
       variableCollectionId: "c1",
       valuesByMode: { M1: 4 },
+    },
+    lineTight: {
+      name: "Line/Tight",
+      resolvedType: "FLOAT",
+      variableCollectionId: "c1",
+      valuesByMode: { M1: 24 },
+    },
+    flagOn: {
+      name: "Flag/On",
+      resolvedType: "BOOLEAN",
+      variableCollectionId: "c1",
+      valuesByMode: { M1: true },
     },
     bgPrimary: {
       name: "Background/Primary",
@@ -125,13 +179,37 @@ function makeFigmaMock() {
         D: { r: 0, g: 0, b: 0, a: 0.5 },
       },
     },
+    accentRef: {
+      name: "Accent/Ref",
+      resolvedType: "COLOR",
+      variableCollectionId: "c2",
+      valuesByMode: {
+        L: { type: "VARIABLE_ALIAS", id: "accent" },
+        D: { type: "VARIABLE_ALIAS", id: "accent" },
+      },
+    },
+    lightOnly: {
+      name: "Light/Only",
+      resolvedType: "COLOR",
+      variableCollectionId: "c2",
+      valuesByMode: { L: { r: 0.5, g: 0.5, b: 0.5, a: 1 } },  // no Dark value
+    },
+    accent: {
+      name: "Accent/Main",
+      resolvedType: "COLOR",
+      variableCollectionId: "c3",
+      valuesByMode: {
+        l3: { r: 1, g: 0, b: 0, a: 1 },
+        d3: { r: 0, g: 1, b: 0, a: 1 },
+      },
+    },
   };
 
-  const collections: Record<string, any> = { c1: primitives, c2: tokens };
+  const collections: Record<string, any> = { c1: primitives, c2: tokens, c3: accents };
 
   return {
     variables: {
-      getLocalVariableCollectionsAsync: async () => [primitives, tokens],
+      getLocalVariableCollectionsAsync: async () => [primitives, tokens, accents],
       getVariableByIdAsync: async (id: string) => vars[id] ?? null,
       getVariableCollectionByIdAsync: async (id: string) => collections[id] ?? null,
     },
@@ -213,6 +291,59 @@ describe("exportToTailwindPreset (end-to-end with a Figma mock)", () => {
     expect(result).toContain('Unit: rem');
   });
 
+  it("treats line-height as a length (Figma line-heights are px, not multipliers)", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const px = await exportToTailwindPreset();
+    expect(px).toContain('tight: "24px"');
+
+    const rem = await exportToTailwindPreset(undefined, "", "rem");
+    expect(rem).toContain('tight: "1.5rem"');
+  });
+
+  it("emits real booleans (not the strings \"true\"/\"false\")", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwindPreset();
+
+    expect(result).toContain("on: true");
+    expect(result).not.toContain('on: "true"');
+
+    const mod = { exports: {} as any };
+    new Function("module", "exports", result)(mod, mod.exports);
+    expect(mod.exports.theme.extend.other.flag.on).toBe(true);
+  });
+
+  it("warns when two collections collide on the same category+path", async () => {
+    const dup = {
+      name: "Colors/Blue/500",
+      resolvedType: "COLOR",
+      variableCollectionId: "cX",
+      valuesByMode: { MX: { r: 1, g: 0, b: 0, a: 1 } },
+    };
+    const collision = { id: "cX", name: "Collision", modes: [{ name: "Mode 1", modeId: "MX" }], variableIds: ["dup"] };
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          { id: "c1", name: "A", modes: [{ name: "Mode 1", modeId: "M1" }], variableIds: ["base"] },
+          collision,
+        ],
+        getVariableByIdAsync: async (id: string) => ({
+          base: { name: "Colors/Blue/500", resolvedType: "COLOR", variableCollectionId: "c1", valuesByMode: { M1: { r: 0, g: 0, b: 1, a: 1 } } },
+          dup,
+        } as Record<string, any>)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await exportToTailwindPreset();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("colors.blue.500"));
+      // The later collection still wins (previous behavior kept, now loud).
+      expect(result).toContain("#ff0000");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("emits bare var() colors in 'var' color mode", async () => {
     (globalThis as any).figma = makeFigmaMock();
     const result = await exportToTailwindPreset(undefined, "", "px", "var");
@@ -253,5 +384,42 @@ describe("exportToTailwindPreset (end-to-end with a Figma mock)", () => {
     );
     expect(mod.exports.theme.extend.spacing["4"]).toBe("16px");
     expect(mod.exports.theme.extend.fontWeight.weight.bold).toBe(700);
+  });
+});
+
+describe("collectThemedTokens (mode matching and fallbacks)", () => {
+  afterEach(() => {
+    delete (globalThis as any).figma;
+  });
+
+  const selectAll = { c1: ["M1"], c2: ["L", "D"], c3: ["l3", "d3"] };
+
+  it("resolves aliases through case-insensitive mode-name matching", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const { defaultTokens, extraThemes } = await collectThemedTokens(selectAll);
+
+    const defaultRef = defaultTokens.find((token) => token.path.join("/") === "accent/ref");
+    expect(defaultRef?.value).toEqual({ r: 1, g: 0, b: 0, a: 1 });  // "Light" → "light"
+
+    const dark = extraThemes.find((theme) => theme.mode === "Dark");
+    const darkRef = dark?.tokens.find((token) => token.path.join("/") === "accent/ref");
+    expect(darkRef?.value).toEqual({ r: 0, g: 1, b: 0, a: 1 });  // "Dark" → "DARK"
+  });
+
+  it("falls back to the default mode value when a variable has none for the theme mode", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const { extraThemes } = await collectThemedTokens(selectAll);
+
+    const dark = extraThemes.find((theme) => theme.mode === "Dark");
+    const lightOnly = dark?.tokens.find((token) => token.path.join("/") === "light/only");
+    expect(lightOnly?.value).toEqual({ r: 0.5, g: 0.5, b: 0.5, a: 1 });
+  });
+
+  it("skips variables that have no value in any mode", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const { extraThemes } = await collectThemedTokens(selectAll);
+
+    const dark = extraThemes.find((theme) => theme.mode === "Dark");
+    expect(dark?.tokens.some((token) => token.path.join("/") === "background/broken")).toBe(false);
   });
 });

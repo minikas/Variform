@@ -28,6 +28,15 @@ export interface DiffResult {
   removed: number;
 }
 
+/**
+ * Escape a single object key so flattened paths never collide: Figma variable
+ * names may contain ".", "[" or "]" themselves, so `{"a":{"b":1}}` and
+ * `{"a.b":1}` (or a literal "a[0]" key vs. an array index) must stay distinct.
+ */
+function escapePathSegment(segment: string): string {
+  return segment.replace(/\\/g, "\\\\").replace(/[.[\]]/g, (ch) => `\\${ch}`);
+}
+
 /** Flatten a JSON document into a map of dotted paths to stringified leaf values. */
 export function flattenJson(content: string): Map<string, string> | null {
   let parsed: unknown;
@@ -50,7 +59,8 @@ export function flattenJson(content: string): Map<string, string> | null {
       return;
     }
     for (const [childKey, value] of Object.entries(node as Record<string, unknown>)) {
-      walk(value, prefix ? `${prefix}.${childKey}` : childKey);
+      const escaped = escapePathSegment(childKey);
+      walk(value, prefix ? `${prefix}.${escaped}` : escaped);
     }
   };
 
@@ -68,21 +78,45 @@ export function parseCssVars(content: string): Map<string, string> {
   const selectorStack: string[] = [];
   const withoutComments = content.replace(/\/\*[\s\S]*?\*\//g, "");
 
+  const recordDeclaration = (raw: string) => {
+    const match = /^(--[A-Za-z0-9_-]+)\s*:\s*([\s\S]+)$/.exec(raw.trim());
+    if (match) {
+      const context = selectorStack.filter(Boolean).join(" > ");
+      const key = context ? `${context} | ${match[1]}` : match[1];
+      map.set(key, match[2].trim());
+    }
+  };
+
+  // Mini-tokenizer: quotes and escapes are honored so ";", "{" and "}" inside
+  // string values (which the exporter itself can emit) never split a
+  // declaration or corrupt the selector stack.
   let buffer = "";
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
   for (const ch of withoutComments) {
-    if (ch === "{") {
+    if (escaped) {
+      buffer += ch;
+      escaped = false;
+    } else if (quote !== null) {
+      buffer += ch;
+      if (ch === "\\") {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = null;
+      }
+    } else if (ch === '"' || ch === "'") {
+      buffer += ch;
+      quote = ch;
+    } else if (ch === "{") {
       selectorStack.push(buffer.trim().replace(/\s+/g, " "));
       buffer = "";
     } else if (ch === "}") {
+      // A trailing declaration without ";" is still a declaration.
+      recordDeclaration(buffer);
       selectorStack.pop();
       buffer = "";
     } else if (ch === ";") {
-      const match = /^(--[A-Za-z0-9_-]+)\s*:\s*(.+)$/.exec(buffer.trim());
-      if (match) {
-        const context = selectorStack.filter(Boolean).join(" > ");
-        const key = context ? `${context} | ${match[1]}` : match[1];
-        map.set(key, match[2].trim());
-      }
+      recordDeclaration(buffer);
       buffer = "";
     } else {
       buffer += ch;

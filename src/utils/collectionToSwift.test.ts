@@ -137,9 +137,9 @@ describe("exportToSwift", () => {
     const result = await exportToSwift();
 
     expect(result).toContain("spacing4: CGFloat = 16.0");
-    // "Font Size/Body" categorizes as spacing (the 'size' heuristic wins over
-    // 'font'), so the constant name reflects that category.
-    expect(result).toContain("spacingFontSizeBody: CGFloat = 14.0");
+    // "Font Size/Body" categorizes as fontSize (the typography branch wins
+    // over the generic size branch).
+    expect(result).toContain("fontSizeBody: CGFloat = 14.0");
   });
 
   it("emits STRING values quoted", async () => {
@@ -238,5 +238,129 @@ describe("exportToSwift", () => {
 
     expect(result).toContain("public enum Tokens {");
     expect(result).not.toContain("TokensDark");
+  });
+
+  it("lists the used modes in the header", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToSwift();
+
+    expect(result).toContain("// Modes: Primitives → Light");
+  });
+
+  it("sanitizes accented and punctuation-heavy names to ASCII identifiers", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["acao", "compact"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            acao: {
+              name: "Colors/Ação",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 1, g: 0, b: 0, a: 1 } },
+            },
+            compact: {
+              name: "Spacing/4 (compact)",
+              resolvedType: "FLOAT",
+              variableCollectionId: "c1",
+              valuesByMode: { L: 8 },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToSwift();
+
+    // "Ação" loses the diacritics; "4 (compact)" treats the parenthesized part
+    // as another word. Both must be valid identifiers.
+    expect(result).toContain("colorsAcao = UIColor(");
+    expect(result).toContain("spacing4Compact: CGFloat = 8.0");
+    expect(result).not.toContain("Ação");
+    expect(result).not.toContain("(compact)");
+  });
+
+  it("suffixes duplicate constant names so the enum compiles", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["a", "b"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            a: {
+              name: "Colors/Blue 500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 1, a: 1 } },
+            },
+            b: {
+              name: "Colors/Blue-500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 0.5, a: 1 } },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToSwift();
+
+    // Both names camelCase to colorsBlue500; the second gets a numeric suffix
+    // instead of a duplicate `public static let` (a compile error).
+    expect(result.match(/public static let colorsBlue500/g)?.length).toBe(2);
+    expect(result).toContain("colorsBlue500 = UIColor(red: 0.000, green: 0.000, blue: 1.000, alpha: 1.000)");
+    expect(result).toContain("colorsBlue5002 = UIColor(red: 0.000, green: 0.000, blue: 0.500, alpha: 1.000)");
+  });
+
+  it("suffixes colliding mode enum names instead of redeclaring them", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [
+              { name: "Light", modeId: "L" },
+              { name: "Dark Mode", modeId: "DM" },
+              { name: "Dark-Mode", modeId: "DM2" },
+            ],
+            variableIds: ["blue"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          id === "blue"
+            ? {
+                name: "Colors/Blue",
+                resolvedType: "COLOR",
+                variableCollectionId: "c1",
+                valuesByMode: {
+                  L: { r: 0, g: 0, b: 1, a: 1 },
+                  DM: { r: 0, g: 0, b: 0.2, a: 1 },
+                  DM2: { r: 0, g: 0, b: 0.1, a: 1 },
+                },
+              }
+            : null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToSwift();
+
+    // "Dark Mode" and "Dark-Mode" both PascalCase to TokensDarkMode; without a
+    // suffix the file would declare the same enum twice.
+    expect(result).toContain("public enum TokensDarkMode {");
+    expect(result).toContain("public enum TokensDarkMode2 {");
+    expect(result.match(/public enum TokensDarkMode \{/g)?.length).toBe(1);
   });
 });

@@ -3,14 +3,15 @@ import { toCssVar } from "./stringTransformation";
 import { getMatchingModeName } from "./variableUtils";
 import { isCollectionSelected, selectedModes } from "./selectionUtils";
 import { detectTailwindCategory, transformToTailwindName, formatTailwindLength } from "./collectionToTailwind";
+import { toJsObjectLiteral } from "./jsSerialize";
 import type { ExportSelection, TailwindColorMode, TailwindUnit } from "../types.d";
 
-type PresetDictionary = Record<string, any>;
+type PresetDictionary = Record<string, unknown>;
 
-/** v3 theme keys whose FLOAT values are lengths (emitted as "Npx"). */
-const PX_KEYS = new Set(["spacing", "borderRadius", "fontSize", "letterSpacing"]);
+/** v3 theme keys whose FLOAT values are lengths (emitted in the chosen unit). */
+const PX_KEYS = new Set(["spacing", "borderRadius", "fontSize", "letterSpacing", "lineHeight"]);
 /** v3 theme keys whose FLOAT values are unitless (emitted as numbers). */
-const NUMBER_KEYS = new Set(["fontWeight", "lineHeight", "opacity"]);
+const NUMBER_KEYS = new Set(["fontWeight", "opacity"]);
 
 /**
  * Maps a variable to its Tailwind v3 theme key, reusing the v4 category
@@ -70,7 +71,7 @@ export function tokenPath(name: string, category: string, prefix: string = ""): 
  * @param presetKey - The v3 theme key the value belongs to
  * @returns The value as it should appear in the preset
  */
-function presetValue(resolvedType: string, value: VariableValue, presetKey: string, unit: TailwindUnit): string | number {
+function presetValue(resolvedType: string, value: VariableValue, presetKey: string, unit: TailwindUnit): string | number | boolean {
     if (resolvedType === "FLOAT") {
         const num = parseFloat(value as string);
         if (PX_KEYS.has(presetKey)) return formatTailwindLength(num, unit);
@@ -78,7 +79,7 @@ function presetValue(resolvedType: string, value: VariableValue, presetKey: stri
         if (NUMBER_KEYS.has(presetKey)) return num;
         return String(value);
     }
-    if (resolvedType === "BOOLEAN") return Boolean(value) ? "true" : "false";
+    if (resolvedType === "BOOLEAN") return Boolean(value);
     return String(value);
 }
 
@@ -126,21 +127,22 @@ function colorValue(name: string, value: RGBA, prefix: string, colorMode: Tailwi
 async function resolveAlias(
     variableId: string,
     modeName: string,
-    depth: number
+    depth: number,
+    selection?: ExportSelection
 ): Promise<{ name: string; value: VariableValue; resolvedType: VariableResolvedDataType } | null> {
     if (depth > 5) return null;
     const linkedVar = await figma.variables.getVariableByIdAsync(variableId);
     if (!linkedVar) return null;
 
     const linkedCollection = await figma.variables.getVariableCollectionByIdAsync(linkedVar.variableCollectionId);
-    const matchedModeName = linkedCollection ? getMatchingModeName(modeName, linkedCollection) : modeName;
+    const matchedModeName = linkedCollection ? getMatchingModeName(modeName, linkedCollection, selection) : modeName;
     const matchedMode =
         linkedCollection?.modes.find((mode) => mode.name === matchedModeName) ?? linkedCollection?.modes[0];
     const value = matchedMode ? linkedVar.valuesByMode[matchedMode.modeId] : undefined;
 
     if (value === undefined) return null;
     if (typeof value === 'object' && 'type' in value && value.type === 'VARIABLE_ALIAS') {
-        return resolveAlias(value.id, modeName, depth + 1);
+        return resolveAlias(value.id, modeName, depth + 1, selection);
     }
     return { name: linkedVar.name, value, resolvedType: linkedVar.resolvedType };
 }
@@ -149,14 +151,27 @@ async function resolveAlias(
  * Sets a value at a nested path inside a dictionary, creating intermediate
  * objects as needed. Shared by the dictionary-style serializers (Tailwind
  * preset, React Native, Tamagui, Style Dictionary).
+ *
+ * Prototype-pollution safe: path segments such as `__proto__`, `constructor`
+ * or `prototype` are always created as OWN properties (via defineProperty, so
+ * `__proto__` never triggers the prototype setter), and an inherited node is
+ * never reused. An existing own node that is not a plain object (e.g. a leaf
+ * from a shorter path) is replaced by a fresh object.
  */
 export function setNestedPath(root: Record<string, any>, path: string[], value: unknown): void {
     let current = root;
     for (let i = 0; i < path.length - 1; i++) {
-        current[path[i]] = current[path[i]] || {};
-        current = current[path[i]];
+        const key = path[i];
+        const existing = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : undefined;
+        if (existing === null || typeof existing !== "object" || Array.isArray(existing)) {
+            const node: Record<string, any> = {};
+            Object.defineProperty(current, key, { value: node, writable: true, enumerable: true, configurable: true });
+            current = node;
+        } else {
+            current = existing;
+        }
     }
-    current[path[path.length - 1]] = value;
+    Object.defineProperty(current, path[path.length - 1], { value, writable: true, enumerable: true, configurable: true });
 }
 
 /**
@@ -190,13 +205,19 @@ export interface ThemeTokens {
 
 /**
  * Flattens a collection's variables to concrete tokens for one effective mode,
- * resolving aliases to the terminal token.
+ * resolving aliases to the terminal token. When a variable has no value for
+ * the requested mode, falls back to its value in the collection's default
+ * mode (the first selected mode, or modes[0] without a selection) — mirroring
+ * Figma's own fallback — instead of dropping the token. Variables with no
+ * value in ANY mode are still skipped.
  */
 async function flattenCollection(
     collection: VariableCollection,
     mode: { name: string; modeId: string },
     prefix: string,
-    validTypes: Set<VariableResolvedDataType>
+    validTypes: Set<VariableResolvedDataType>,
+    selection?: ExportSelection,
+    defaultMode?: { name: string; modeId: string }
 ): Promise<FlatToken[]> {
     const tokens: FlatToken[] = [];
 
@@ -206,11 +227,14 @@ async function flattenCollection(
 
         const { name, resolvedType, valuesByMode } = figVar;
         let value: VariableValue | undefined = valuesByMode[mode.modeId];
+        if (value === undefined && defaultMode && defaultMode.modeId !== mode.modeId) {
+            value = valuesByMode[defaultMode.modeId];
+        }
         let valueType = resolvedType;
         let terminalName = name;
 
         if (value !== undefined && typeof value === 'object' && 'type' in value && value.type === 'VARIABLE_ALIAS') {
-            const resolved = await resolveAlias(value.id, mode.name, 0);
+            const resolved = await resolveAlias(value.id, mode.name, 0, selection);
             if (!resolved) continue;  // broken alias: skip the token
             value = resolved.value;
             valueType = resolved.resolvedType;
@@ -267,7 +291,7 @@ export async function collectThemedTokens(
 
         // Mode names beyond each collection's default become theme variants.
         for (const mode of modes.slice(1)) {
-            if (!extraModeNames.some((name) => name.toLowerCase() === mode.name.trim().toLowerCase())) {
+            if (!extraModeNames.some((name) => name.trim().toLowerCase() === mode.name.trim().toLowerCase())) {
                 extraModeNames.push(mode.name);
             }
         }
@@ -275,7 +299,7 @@ export async function collectThemedTokens(
 
     const defaultTokens: FlatToken[] = [];
     for (const { collection, defaultMode } of effective) {
-        defaultTokens.push(...await flattenCollection(collection, defaultMode, prefix, validTypes));
+        defaultTokens.push(...await flattenCollection(collection, defaultMode, prefix, validTypes, selection, defaultMode));
     }
 
     const extraThemes: ThemeTokens[] = [];
@@ -285,7 +309,7 @@ export async function collectThemedTokens(
             // Collections without this mode fall back to their default values,
             // so every theme variant is complete.
             const match = modes.find((mode) => mode.name.trim().toLowerCase() === modeName.trim().toLowerCase());
-            tokens.push(...await flattenCollection(collection, match ?? defaultMode, prefix, validTypes));
+            tokens.push(...await flattenCollection(collection, match ?? defaultMode, prefix, validTypes, selection, defaultMode));
         }
         extraThemes.push({ mode: modeName, tokens });
     }
@@ -310,12 +334,28 @@ export async function collectTokens(
 }
 
 /**
+ * Whether an own value already exists at a nested path. Used to detect
+ * category+path collisions between collections before setNestedPath
+ * overwrites the previous token silently.
+ */
+function hasOwnNestedPath(root: Record<string, any>, path: string[]): boolean {
+    let current: any = root;
+    for (const key of path) {
+        if (current === null || typeof current !== "object" ||
+            !Object.prototype.hasOwnProperty.call(current, key)) {
+            return false;
+        }
+        current = current[key];
+    }
+    return true;
+}
+
+/**
  * Serializes the dictionary as a JS object literal, unquoting keys that are
  * valid identifiers (kebab-case and numeric keys stay quoted).
  */
 function serializeDictionary(dictionary: PresetDictionary): string {
-    return JSON.stringify(dictionary, null, 2)
-        .replace(/"([A-Za-z_$][A-Za-z0-9_$]*)":/g, "$1:");
+    return toJsObjectLiteral(dictionary);
 }
 
 /**
@@ -342,7 +382,11 @@ export const exportToTailwindPreset = async (
             const formatted = token.resolvedType === "COLOR"
                 ? colorValue(token.terminalName, token.value as RGBA, prefix, colorMode)
                 : presetValue(token.resolvedType, token.value, token.category, unit);
-            setNestedPath(extend, [token.category, ...token.path], formatted);
+            const fullPath = [token.category, ...token.path];
+            if (hasOwnNestedPath(extend, fullPath)) {
+                console.warn(`Tailwind preset: overwriting "${fullPath.join(".")}" — two variables map to the same category+path (the later collection wins).`);
+            }
+            setNestedPath(extend, fullPath, formatted);
         }
 
         const header = [

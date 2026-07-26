@@ -1,6 +1,7 @@
 import { rgbToHex8 } from "./color";
 import { toCssVar, toCamelCase } from "./stringTransformation";
 import { collectThemedTokens, setNestedPath } from "./collectionToTailwindPreset";
+import { toJsObjectLiteral } from "./jsSerialize";
 import type { FlatToken } from "./collectionToTailwindPreset";
 import type { ExportSelection } from "../types.d";
 
@@ -27,19 +28,27 @@ function tokenValue(resolvedType: string, value: VariableValue): string | number
  * valid identifiers (kebab-case and numeric keys stay quoted).
  */
 function serializeDictionary(dictionary: ThemeDictionary): string {
-    return JSON.stringify(dictionary, null, 2)
-        .replace(/"([A-Za-z_$][A-Za-z0-9_$]*)":/g, "$1:");
+    return toJsObjectLiteral(dictionary);
 }
 
 /**
  * Builds the nested theme dictionary (category → path → value) from a flat
- * token list.
+ * token list. Homonymous tokens (same category + path, e.g. from different
+ * collections) keep the first value and warn, instead of silently
+ * overwriting each other.
  * @param tokens - The flat tokens of one theme variant
  * @returns The nested theme dictionary
  */
 function buildThemeDictionary(tokens: FlatToken[]): ThemeDictionary {
     const theme: ThemeDictionary = {};
+    const seen = new Set<string>();
     for (const token of tokens) {
+        const id = [token.category, ...token.path].join("/");
+        if (seen.has(id)) {
+            console.warn(`[Variform] Duplicate token "${id}" — keeping the first value.`);
+            continue;
+        }
+        seen.add(id);
         setNestedPath(theme, [token.category, ...token.path], tokenValue(token.resolvedType, token.value));
     }
     return theme;
@@ -54,6 +63,25 @@ function objectKey(key: string): string {
 }
 
 /**
+ * Normalizes a mode name into a `themes` map key. toCamelCase keeps all-caps
+ * names ("DARK") untouched, but useColorScheme() returns lowercase ("dark"),
+ * so all-caps keys are lowercased — otherwise themes[colorScheme] misses.
+ */
+function themeKey(mode: string): string {
+    const key = toCamelCase(mode);
+    return /^[A-Z0-9_]+$/.test(key) ? key.toLowerCase() : key;
+}
+
+/**
+ * Builds the exported const name for a theme variant ("dark" → "darkTheme"),
+ * prefixing "_" when the key does not start with a letter so the identifier
+ * stays valid ("2xl" → "_2xlTheme").
+ */
+function themeConstName(key: string): string {
+    return `${/^[A-Za-z_$]/.test(key) ? key : `_${key}`}Theme`;
+}
+
+/**
  * Exports all local variable collections as a React Native / Expo theme
  * object. A theme is static, so values come from the first selected mode of
  * each collection and aliases are resolved to concrete values. Every
@@ -61,7 +89,9 @@ function objectKey(key: string): string {
  * (`darkTheme`, `contrastTheme`, ...) after the default `theme`, and all
  * variants are gathered in a `themes` map keyed by camelCased mode name
  * (`light`, `dark`, ...) so the app can select one with React Native's
- * useColorScheme hook, as documented by Expo and React Native.
+ * useColorScheme hook, as documented by Expo and React Native. Mode names
+ * that collide after camelCase normalization (or with the default key) get
+ * a numeric suffix, so every emitted const appears exactly once in the map.
  * @param selection - Optional export selection (omit to export everything)
  * @param prefix - Optional prefix prepended to each token family segment
  * @returns TypeScript module string exporting the theme objects
@@ -75,7 +105,27 @@ export const exportToReactNative = async (
 
         // usedModes entries are "Collection → Mode"; the first collection's
         // default mode names the default theme's key in the `themes` map.
-        const defaultKey = toCamelCase(usedModes[0]?.split("→").pop()?.trim() ?? "default");
+        const defaultKey = themeKey(usedModes[0]?.split("→").pop()?.trim() ?? "default");
+
+        // Normalize each extra theme's key once, deduping collisions that
+        // only appear after camelCase normalization ("Dark Mode" vs
+        // "dark-mode" both → "darkMode") or against the default key —
+        // otherwise the module would export duplicate consts and duplicate
+        // map keys. Colliding variants get a numeric suffix and stay in the
+        // map (never a dead const, never overwriting the default theme).
+        const variants: { key: string; tokens: FlatToken[] }[] = [];
+        for (const { mode, tokens } of extraThemes) {
+            const base = themeKey(mode);
+            let key = base;
+            let i = 2;
+            while (key === defaultKey || variants.some((variant) => variant.key === key)) {
+                key = `${base}${i++}`;
+            }
+            if (key !== base) {
+                console.warn(`[Variform] Theme mode "${mode}" collides with another theme after normalization; exported as "${key}".`);
+            }
+            variants.push({ key, tokens });
+        }
 
         const header = [
             "/**",
@@ -84,9 +134,9 @@ export const exportToReactNative = async (
             " * collection and aliases are resolved to concrete values.",
             ...(usedModes.length > 0 ? [` * Modes: ${usedModes.join("; ")}`] : []),
             ...(prefix ? [` * Prefix: "${toCssVar(prefix)}"`] : []),
-            ...(extraThemes.length > 0
+            ...(variants.length > 0
                 ? [
-                    ` * Themes: ${extraThemes.map((theme) => toCamelCase(theme.mode)).join(", ")}`,
+                    ` * Themes: ${variants.map((variant) => variant.key).join(", ")}`,
                     " *",
                     " * Light/dark selection follows the Expo / React Native convention",
                     " * (https://docs.expo.dev/develop/user-interface/color-themes/): pick",
@@ -103,17 +153,15 @@ export const exportToReactNative = async (
 
         const modules = [
             `export const theme = ${serializeDictionary(buildThemeDictionary(defaultTokens))} as const;`,
-            ...extraThemes.map(
-                ({ mode, tokens }) =>
-                    `export const ${toCamelCase(mode)}Theme = ${serializeDictionary(buildThemeDictionary(tokens))} as const;`
+            ...variants.map(
+                ({ key, tokens }) =>
+                    `export const ${themeConstName(key)} = ${serializeDictionary(buildThemeDictionary(tokens))} as const;`
             ),
-            ...(extraThemes.length > 0
+            ...(variants.length > 0
                 ? [
                     `export const themes = {\n${[
                         `  ${objectKey(defaultKey)}: theme`,
-                        ...extraThemes
-                            .filter(({ mode }) => toCamelCase(mode) !== defaultKey)
-                            .map(({ mode }) => `  ${objectKey(toCamelCase(mode))}: ${toCamelCase(mode)}Theme`),
+                        ...variants.map(({ key }) => `  ${objectKey(key)}: ${themeConstName(key)}`),
                     ].join(",\n")}\n} as const;`,
                 ]
                 : []),

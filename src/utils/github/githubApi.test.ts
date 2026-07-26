@@ -26,12 +26,17 @@ const conn: GitHubConnection = {
 interface FakeResponseInit {
   status?: number;
   body?: unknown;
+  /** Content-Type header, mirroring what GitHub would send. */
+  contentType?: string;
 }
 
-function fakeResponse({ status = 200, body }: FakeResponseInit) {
+function fakeResponse({ status = 200, body, contentType }: FakeResponseInit) {
   return {
     status,
     ok: status >= 200 && status < 300,
+    headers: new Headers(
+      contentType ? { "Content-Type": contentType } : undefined,
+    ),
     json: async () => body,
     text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
   };
@@ -236,7 +241,7 @@ describe("getFileContent", () => {
     const fetchMock = vi.fn(async (_url: string, init?: { headers?: Record<string, string> }) => {
       // Requests the raw media type rather than the JSON envelope.
       expect(init?.headers?.Accept).toBe("application/vnd.github.raw");
-      return fakeResponse({ body: "{\n  \"a\": 1\n}" });
+      return fakeResponse({ body: "{\n  \"a\": 1\n}", contentType: "text/plain; charset=utf-8" });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -246,6 +251,21 @@ describe("getFileContent", () => {
   it("returns null when the file is missing (404)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({ status: 404 })));
     expect(await getFileContent(conn, "tokens.json", "main")).toBeNull();
+  });
+
+  it("returns null when the path is a directory (200 with a JSON listing)", async () => {
+    // GitHub ignores the raw media type for directories and answers 200 with
+    // the JSON listing — it must not become the "old content" of a diff.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        fakeResponse({
+          body: [{ name: "a.json", type: "file" }],
+          contentType: "application/json; charset=utf-8",
+        }),
+      ),
+    );
+    expect(await getFileContent(conn, "tokens", "main")).toBeNull();
   });
 });
 
@@ -439,6 +459,79 @@ describe("pushFile", () => {
 
     expect(result.prUrl).toBeNull();
     expect(result.compareUrl).toContain("compare/main...varvar/export-abc");
+  });
+
+  it("continues with the existing branch when createBranch races a 422", async () => {
+    const fetchMock = routeFetch([
+      // target branch does not exist yet
+      { method: "GET", match: "/git/ref/heads/varvar/export", response: { status: 404 } },
+      // base branch SHA lookup
+      {
+        method: "GET",
+        match: "/git/ref/heads/main",
+        response: { body: { object: { sha: "basesha" } } },
+      },
+      // another process created the branch first
+      {
+        method: "POST",
+        match: "/git/refs",
+        response: { status: 422, body: { message: "Reference already exists" } },
+      },
+      // re-check confirms the branch now exists — safe to continue
+      {
+        method: "GET",
+        match: "/git/ref/heads/varvar/export",
+        response: { body: { object: { sha: "racedsha" } } },
+      },
+      { method: "GET", match: "/contents/tokens.json", response: { status: 404 } },
+      {
+        method: "PUT",
+        match: "/contents/tokens.json",
+        response: { body: { commit: { sha: "commitsha" }, content: { html_url: "u" } } },
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await pushFile(conn, {
+      path: "tokens.json",
+      content: "{}",
+      commitMessage: "msg",
+      branch: "varvar/export-abc",
+      createPr: false,
+    });
+
+    expect(result.commitSha).toBe("commitsha");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("rethrows a 422 from createBranch when the branch still does not exist", async () => {
+    const fetchMock = routeFetch([
+      { method: "GET", match: "/git/ref/heads/varvar/export", response: { status: 404 } },
+      {
+        method: "GET",
+        match: "/git/ref/heads/main",
+        response: { body: { object: { sha: "basesha" } } },
+      },
+      // e.g. the base SHA was rejected — not a race
+      {
+        method: "POST",
+        match: "/git/refs",
+        response: { status: 422, body: { message: "Validation Failed" } },
+      },
+      // the branch really is absent, so the 422 is rethrown
+      { method: "GET", match: "/git/ref/heads/varvar/export", response: { status: 404 } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      pushFile(conn, {
+        path: "tokens.json",
+        content: "{}",
+        commitMessage: "msg",
+        branch: "varvar/export-abc",
+        createPr: false,
+      }),
+    ).rejects.toMatchObject({ status: 422 });
   });
 
   it("commits directly to the base branch and skips PR when target equals base", async () => {

@@ -74,6 +74,9 @@ describe("fontWeightFromStyle", () => {
     ["Medium", 500],
     ["Semi Bold", 600],
     ["SemiBold", 600],
+    ["Demi Bold", 600],
+    ["Ultra Light", 200],
+    ["Ultra  Light", 200],
     ["Bold", 700],
     ["Extra Bold", 800],
     ["Black", 900],
@@ -196,11 +199,21 @@ describe("paintsToCss", () => {
     });
   });
 
-  it("layers multiple paints as a reversed background (top paint first)", () => {
+  it("layers multiple paints in Figma order (index 0 = top paint, like CSS)", () => {
     expect(paintsToCss([solid(1, 0, 0), solid(0, 0, 1)])).toEqual({
       property: "background",
-      value: "#0000ff, #ff0000",
+      value: "#ff0000, #0000ff",
     });
+  });
+
+  it("skips image paints instead of leaking a comment into the CSS value", () => {
+    const image = { type: "IMAGE", visible: true } as unknown as Paint;
+    expect(paintToCss(image)).toBeNull();
+    expect(paintsToCss([solid(1, 1, 1), image])).toEqual({
+      property: "color",
+      value: "#ffffff",
+    });
+    expect(paintsToCss([image])).toBeNull();
   });
 
   it("returns null when there are no renderable paints", () => {

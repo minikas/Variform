@@ -180,6 +180,33 @@ describe("exportToTS (end-to-end with a Figma mock)", () => {
     expect(errors).toEqual([]);
   });
 
+  it("appends `as const` to the local style statements too", async () => {
+    const mock = makeFigmaMock();
+    (globalThis as any).figma = {
+      ...mock,
+      getLocalTextStylesAsync: async () => [
+        {
+          name: "Body/Regular",
+          description: "",
+          fontName: { family: "Inter", style: "Regular" },
+          fontSize: 16,
+          lineHeight: { unit: "PIXELS", value: 24 },
+          letterSpacing: { unit: "PERCENT", value: 0 },
+          textCase: "ORIGINAL",
+          textDecoration: "NONE",
+          paragraphSpacing: 0,
+        },
+      ],
+      getLocalPaintStylesAsync: async () => [],
+      getLocalEffectStylesAsync: async () => [],
+      getLocalGridStylesAsync: async () => [],
+    };
+    const result = (await exportToTS(undefined, { text: true, paint: false, effect: false, grid: false })) as string;
+
+    expect(result).toContain("export const textStyles = {");
+    expect(result).toMatch(/export const textStyles = \{[\s\S]*\} as const;/);
+  });
+
   it("never emits the sequence that breaks the Figma plugin runtime", async () => {
     (globalThis as any).figma = makeCrossCollectionMock();
     const result = (await exportToTS(undefined, NO_STYLES)) as string;

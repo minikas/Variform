@@ -119,6 +119,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
   // Gate persistence until the stored value has been applied, so the provisional
   // "all selected" default never overwrites a saved selection.
   const hydratedRef = useRef(false);
+  // The persisted collection/mode selection, parked here when storage replies
+  // before the collection tree arrives (and simply never applied in documents
+  // without collections).
+  const pendingSelectionRef = useRef<ExportSelection | null>(null);
 
   const storageKey = filename ? `${SELECTION_STORAGE_PREFIX}${filename}` : null;
 
@@ -163,56 +167,67 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
     );
   }, [storageKey]);
 
-  // Hydrate from the saved selection once both the tree and the storage reply
-  // are available, reconciling against the collections that still exist.
+  // Hydrate from the saved selection once the storage reply is available.
+  // Options (format, tailwind, parser, ...) restore even in documents without
+  // collections; only the collection/mode selection waits for the tree, since
+  // reconciling it requires the collections that still exist.
   useEffect(() => {
-    if (collections.length === 0 || storedRaw === undefined || hydratedRef.current) {
-      return;
-    }
-    hydratedRef.current = true;
-    if (!storedRaw) return;
-    try {
-      const parsed = JSON.parse(storedRaw) as Partial<PersistedSelection>;
-      if (parsed && typeof parsed === "object") {
-        if (parsed.selection) {
-          setSelection(reconcileSelection(parsed.selection, collections));
-        }
-        if (parsed.styleSelection && typeof parsed.styleSelection === "object") {
-          setStyleSelection({ ...ALL_STYLES, ...parsed.styleSelection });
-        }
-        if (typeof parsed.parserId === "string") {
-          setParserId(parsed.parserId);
-        }
-        if (parsed.format) {
-          setFormat(parsed.format);
-        }
-        if (typeof parsed.useRowColumnPos === "boolean") {
-          setUseRowColumnPos(parsed.useRowColumnPos);
-        }
-        if (typeof parsed.useTailwindFormat === "boolean") {
-          setUseTailwindFormat(parsed.useTailwindFormat);
-        }
-        if (typeof parsed.useDSCGFormat === "boolean") {
-          setUseDSCGFormat(parsed.useDSCGFormat);
-        }
-        if (parsed.tailwindOutput === "css" || parsed.tailwindOutput === "preset") {
-          setTailwindOutput(parsed.tailwindOutput);
-        }
-        if (typeof parsed.tailwindPrefix === "string") {
-          setTailwindPrefix(parsed.tailwindPrefix);
-        }
-        if (parsed.tailwindUnit === "px" || parsed.tailwindUnit === "rem" || parsed.tailwindUnit === "em") {
-          setTailwindUnit(parsed.tailwindUnit);
-        }
-        if (parsed.tailwindColorMode === "var-fallback" || parsed.tailwindColorMode === "var" || parsed.tailwindColorMode === "concrete" || parsed.tailwindColorMode === "hex") {
-          setTailwindColorMode(parsed.tailwindColorMode);
-        }
-        if (typeof parsed.githubFilePath === "string") {
-          setGithubFilePath(parsed.githubFilePath);
+    if (storedRaw !== undefined && !hydratedRef.current) {
+      hydratedRef.current = true;
+      if (storedRaw) {
+        try {
+          const parsed = JSON.parse(storedRaw) as Partial<PersistedSelection>;
+          if (parsed && typeof parsed === "object") {
+            if (parsed.selection) {
+              pendingSelectionRef.current = parsed.selection;
+            }
+            if (parsed.styleSelection && typeof parsed.styleSelection === "object") {
+              setStyleSelection({ ...ALL_STYLES, ...parsed.styleSelection });
+            }
+            if (typeof parsed.parserId === "string") {
+              setParserId(parsed.parserId);
+            }
+            if (parsed.format) {
+              setFormat(parsed.format);
+            }
+            if (typeof parsed.useRowColumnPos === "boolean") {
+              setUseRowColumnPos(parsed.useRowColumnPos);
+            }
+            if (typeof parsed.useTailwindFormat === "boolean") {
+              setUseTailwindFormat(parsed.useTailwindFormat);
+            }
+            if (typeof parsed.useDSCGFormat === "boolean") {
+              setUseDSCGFormat(parsed.useDSCGFormat);
+            }
+            if (parsed.tailwindOutput === "css" || parsed.tailwindOutput === "preset") {
+              setTailwindOutput(parsed.tailwindOutput);
+            }
+            if (typeof parsed.tailwindPrefix === "string") {
+              setTailwindPrefix(parsed.tailwindPrefix);
+            }
+            if (parsed.tailwindUnit === "px" || parsed.tailwindUnit === "rem" || parsed.tailwindUnit === "em") {
+              setTailwindUnit(parsed.tailwindUnit);
+            }
+            if (parsed.tailwindColorMode === "var-fallback" || parsed.tailwindColorMode === "var" || parsed.tailwindColorMode === "concrete" || parsed.tailwindColorMode === "hex") {
+              setTailwindColorMode(parsed.tailwindColorMode);
+            }
+            if (typeof parsed.githubFilePath === "string") {
+              setGithubFilePath(parsed.githubFilePath);
+            }
+          }
+        } catch {
+          // Ignore corrupt storage and keep the default selection.
         }
       }
-    } catch {
-      // Ignore corrupt storage and keep the default selection.
+    }
+
+    // The collection/mode selection reconciles against the tree, so it can
+    // only be applied once the collections have loaded (BASIC_INFO usually
+    // arrives before the storage reply, but the reverse order is covered too).
+    if (pendingSelectionRef.current && collections.length > 0) {
+      const persisted = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+      setSelection(reconcileSelection(persisted, collections));
     }
   }, [collections, storedRaw]);
 

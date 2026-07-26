@@ -42,7 +42,7 @@ The GitHub sync flow lives next to the download button in every export view:
 - **Tailwind CSS**: Linked variables use CSS custom property syntax with Tailwind naming conventions
 - **Tailwind preset**: Linked variables are resolved to the terminal token — the value references that token's CSS variable (with a hex fallback)
 
-> **Note:** When dealing with linked variables that have multiple modes, the plugin will only link to the first occurrence (i.e., the first mode).
+> **Note:** When a linked variable lives in a multi-mode collection, the plugin matches the current mode by name — exact match first, then case-insensitive ignoring extra whitespace (e.g. `Dark` matches `dark `). If no mode name matches, the alias falls back to the first **selected** mode of the target collection, so links never point at a mode that isn't part of the export.
 
 ### Modes & Theming
 
@@ -66,6 +66,8 @@ Collections with multiple modes (e.g. a `Colour Primitives` collection with **Li
 }
 ```
 
+> **Note:** In CSS, at most one mode per collection lands in `:root` and one in the dark media-query block — any extra selected modes (including a second Light/Default-style mode) become `.{collection}--{mode}` theme classes. In Tailwind v4, if no selected mode is named Light/Default/Mode 1, the first selected mode supplies the `@theme` defaults, so exporting only **Dark** still generates the utilities normally.
+
 ### Selecting What to Export
 
 Every export view shows a **Collections & themes** accordion listing each variable collection and its modes (themes):
@@ -73,11 +75,11 @@ Every export view shows a **Collections & themes** accordion listing each variab
 - **Everything is selected by default** — the plugin behaves exactly as before until you change something.
 - **Per-mode selection**: expand a collection and tick/untick individual modes (themes). The collection's checkbox is tri-state (all / some / none).
 - **Per-collection selection**: tick the collection header to toggle all of its modes at once; use **All** / **None** to (de)select every collection.
-- **Local styles**: four checkboxes (text, paint, effect, grid) control which kinds of local Figma styles are appended (hidden for the DSCG export, which is variables-only).
+- **Local styles**: four checkboxes (text, paint, effect, grid) control which kinds of local Figma styles are appended. The DSCG export honors them too: selected styles are emitted as a dedicated `Styles` token set (typography / color / shadow).
 - **Real-time preview**: the output regenerates as you toggle (debounced), so the preview always reflects the current selection.
 - **Remembered per file**: your selection is saved per document via the plugin's client storage, and reconciled against the current collections the next time you open the file (new collections default to selected; deleted ones are dropped).
 
-> **Note:** A linked variable can reference a token in a collection/mode you did not select. In that case the reference is kept as text (it points outside the exported subset). For the CSV row/column option, a deselected target falls back to a readable `=Collection/Mode/Variable` reference instead of a dangling cell.
+> **Note:** A linked variable can reference a token in a collection/mode you did not select. What happens then depends on the format: **JSON** keeps the textual `$...` reference; **CSS** emits `var(--x, <concrete value>)` with the resolved value as fallback; **JavaScript/TypeScript** resolve the value inline; **CSV** falls back to a readable `=Collection/Mode/Variable` reference (including for the row/column option, instead of a dangling cell); **DSCG** keeps the `{Group.path}` reference.
 
 ### Inspecting Contents
 
@@ -110,7 +112,7 @@ Every export includes your local Figma styles together with the variables — no
 
 In **JSON** and **JavaScript**, styles are emitted as a design-token tree grouped into `textStyles`, `paintStyles`, `effectStyles`, and `gridStyles`. In **CSV**, each style is appended as a row using the same `Collection,Mode,Variable,Type,Value,Scopes,Description` schema as variables.
 
-> **Note:** Gradient angles are derived from Figma's gradient transform assuming a square aspect ratio. The `DIAMOND` gradient type has no CSS equivalent and is approximated with a radial gradient. (The DSCG normalization is variables-only — see the note below.)
+> **Note:** Gradient angles are derived from Figma's gradient transform assuming a square aspect ratio. The `DIAMOND` gradient type has no CSS equivalent and is approximated with a radial gradient. (The DSCG export also includes styles as a dedicated `Styles` token set — see the note below.)
 
 ## Installation
 
@@ -157,7 +159,7 @@ For format selection within the interface:
 
 Every export view includes **Connect GitHub…** / **Push to GitHub** next to the download button (enabled once output has been generated):
 
-1. **Connect** — enter a [GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new) with `contents` and `pull_requests` access (or classic `repo` scope). Pick a repository and base branch from searchable lists. GitHub Enterprise is supported via a custom API base URL.
+1. **Connect** — enter a [GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new) with `contents` and `pull_requests` access (or classic `repo` scope). Pick a repository and base branch from searchable lists. GitHub Enterprise is not currently supported — the plugin can only reach `api.github.com`.
 2. **Remember (optional)** — store the connection in Figma client storage. The token is encrypted with a passphrase you choose (AES-256-GCM) and must be unlocked each session.
 3. **Configure the push** — set the repository file path (remembered per document), target branch (defaults to `variform/<filename>-<suffix>`), commit message, and pull request title/body.
 4. **Review the diff** — **Refresh** compares the new export against the file already on the target branch (or the base branch when the target branch does not exist yet). JSON/DSCG and CSS use token-level diffs; CSV and JavaScript fall back to line diffs.
@@ -183,7 +185,7 @@ Every export view includes **Connect GitHub…** / **Push to GitHub** next to th
 - [x] Android
 - [x] Flutter
 
-> **Themes:** dictionary-style exports (Tailwind preset, React Native, Tamagui, SCSS, Swift, Android, Flutter) use the first selected mode of each collection as the default theme and emit every additional selected mode (e.g. **Dark**) as a complete variant in the same file — `darkTheme` objects, `$theme-dark` maps, `TokensDark` classes, or `values-night` resource blocks. The DTCG export emits one token set per collection/mode.
+> **Themes:** dictionary-style exports (React Native, Tamagui, SCSS, Swift, Android, Flutter) use the first selected mode of each collection as the default theme and emit every additional selected mode (e.g. **Dark**) as a complete variant in the same file — `darkTheme` objects, `$theme-dark` maps, `TokensDark` classes, or `values-night` resource blocks. The **Tailwind preset** and **Style Dictionary JSON** exports are static: they use only the first selected mode of each collection and emit no per-mode variants. The DTCG export emits one token set per collection/mode.
 
 ## Tailwind Export
 
@@ -196,8 +198,8 @@ The two outputs are designed to work together: preset colors reference the very 
 
 ### Tailwind options (remembered per file)
 
-- **Prefix** — prepended to every token family (`colors: { "acme-blue": … }`, `--color-acme-…`).
-- **Unit** — `px`, `rem` or `em` (16px base) for length tokens in both outputs.
+- **Prefix** — prepended to every token family (`colors: { "acme-blue": … }`, `--color-acme-…`), including tokens generated from local styles.
+- **Unit** — `px`, `rem` or `em` (16px base) for length tokens in both outputs, including style-derived tokens (font sizes, px line-heights/letter-spacing).
 - **Colors** (preset only) — how color values are emitted:
   - `var() + hex fallback` (default): `rgb(from var(--color-grayscale--400, #9ea1ab) r g b / <alpha-value>)` — opacity modifiers like `bg-grayscale-400/20` work, and the preset stays functional standalone.
   - `var() only`: `var(--color-grayscale--400)` — requires the CSS file to be loaded.
@@ -271,7 +273,7 @@ Example output:
 }
 ```
 
-> **Note:** DSCG normalizes variable collections only (it does not include local paint, text, or effect styles).
+> **Note:** DSCG includes local styles alongside the variable collections: selected text, paint (solid colors) and effect (shadow) styles are emitted as a dedicated `Styles` token set with `typography` / `color` / `shadow` tokens. Grid styles are skipped, since they have no token equivalent.
 
 ## Architecture
 

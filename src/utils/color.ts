@@ -70,3 +70,15 @@ export const rgbToTailwindColor = ({ r, g, b, a = 1 }: RGBA): string => {
   const alpha = Math.round(a * 100) / 100;
   return `rgb(${channels} / ${alpha})`;
 };
+
+/**
+ * Converts an RGBA color to an ARGB hex string (alpha FIRST, uppercase) as
+ * used by Android (`#AARRGGBB`) and Flutter (`0xAARRGGBB`).
+ * @param {RGBA} param0 - The RGBA color to convert (0–1 channels)
+ * @returns {string} The hex string (`#AARRGGBB`, FF alpha when opaque)
+ */
+export const rgbaToArgbHex = ({ r, g, b, a = 1 }: RGBA): string => {
+  const toHex = (value: number) =>
+    Math.round(value * 255).toString(16).padStart(2, "0").toUpperCase();
+  return `#${toHex(a)}${toHex(r)}${toHex(g)}${toHex(b)}`;
+};

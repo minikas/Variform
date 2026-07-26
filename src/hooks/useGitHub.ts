@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   GitHubConnection,
@@ -103,13 +103,29 @@ function messageOf(error: unknown): string {
   return "An unexpected error occurred while contacting GitHub.";
 }
 
-interface ParsedStored {
+export interface ParsedStored {
   meta: StoredConnection;
   /** Set only for legacy plaintext connections saved before encryption. */
   plaintextToken?: string;
 }
 
-function parseStored(value: string | null | undefined): ParsedStored | null {
+/** Validate that a stored `encrypted` blob has all required string fields. */
+function parseEncrypted(value: unknown): EncryptedSecret | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const blob = value as Record<string, unknown>;
+  if (
+    typeof blob.salt === "string" &&
+    typeof blob.iv === "string" &&
+    typeof blob.ciphertext === "string"
+  ) {
+    return { salt: blob.salt, iv: blob.iv, ciphertext: blob.ciphertext };
+  }
+  return undefined;
+}
+
+export function parseStored(value: string | null | undefined): ParsedStored | null {
   if (!value) {
     return null;
   }
@@ -124,8 +140,9 @@ function parseStored(value: string | null | undefined): ParsedStored | null {
       if (typeof parsed.baseUrl === "string") {
         meta.baseUrl = parsed.baseUrl;
       }
-      if (parsed.encrypted && typeof parsed.encrypted === "object") {
-        meta.encrypted = parsed.encrypted as EncryptedSecret;
+      const encrypted = parseEncrypted(parsed.encrypted);
+      if (encrypted) {
+        meta.encrypted = encrypted;
       }
       return {
         meta,
@@ -136,6 +153,25 @@ function parseStored(value: string | null | undefined): ParsedStored | null {
     // Corrupt value — treat as not connected.
   }
   return null;
+}
+
+/**
+ * Legacy migration: records saved before token encryption held the token in
+ * plaintext. Rewrite clientStorage WITHOUT the plaintext field (keeping any
+ * encrypted blob) and return the adopted token so the current session keeps
+ * working. Returns `null` when there is nothing to migrate. On the next
+ * session there is no plaintext to adopt, so the user reconnects (or unlocks,
+ * if an encrypted record exists).
+ */
+export function migrateLegacyPlaintext(
+  parsed: ParsedStored | null,
+  save: (next: string | null) => void,
+): string | null {
+  if (!parsed?.plaintextToken) {
+    return null;
+  }
+  save(JSON.stringify(parsed.meta));
+  return parsed.plaintextToken;
 }
 
 /**
@@ -165,6 +201,20 @@ export function useGitHub(): UseGitHubReturn {
 
   const isConnected = meta != null;
   const isLocked = meta != null && effectiveToken == null;
+
+  // Scrub legacy plaintext tokens from clientStorage as soon as one is seen:
+  // the token is adopted into the in-memory session (so this session keeps
+  // working) and the record is rewritten without it — never persisted in
+  // clear again. On the next session the user reconnects (or unlocks).
+  useEffect(() => {
+    if (!loaded) {
+      return;
+    }
+    const adopted = migrateLegacyPlaintext(parsed, save);
+    if (adopted !== null) {
+      setSessionToken((current) => current ?? adopted);
+    }
+  }, [loaded, parsed, save]);
 
   // --- Mutations: connect / unlock / push -----------------------------------
 

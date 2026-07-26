@@ -1,5 +1,5 @@
 import { gcm } from "@noble/ciphers/aes.js";
-import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
+import { pbkdf2Async } from "@noble/hashes/pbkdf2.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 
@@ -46,10 +46,14 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
-function deriveKey(passphrase: string, salt: Uint8Array): Uint8Array {
-  return pbkdf2(sha256, new TextEncoder().encode(passphrase), salt, {
+// PBKDF2 runs on the plugin UI's main thread; the async variant yields to the
+// event loop every `asyncTick` ms so 200k iterations don't freeze the UI while
+// connecting or unlocking.
+async function deriveKey(passphrase: string, salt: Uint8Array): Promise<Uint8Array> {
+  return pbkdf2Async(sha256, new TextEncoder().encode(passphrase), salt, {
     c: PBKDF2_ITERATIONS,
     dkLen: 32,
+    asyncTick: 10,
   });
 }
 
@@ -60,7 +64,7 @@ export async function encryptSecret(
 ): Promise<EncryptedSecret> {
   const salt = randomBytes(SALT_BYTES);
   const iv = randomBytes(IV_BYTES);
-  const key = deriveKey(passphrase, salt);
+  const key = await deriveKey(passphrase, salt);
   const ciphertext = gcm(key, iv).encrypt(new TextEncoder().encode(plaintext));
   return {
     salt: toBase64(salt),
@@ -77,8 +81,11 @@ export async function decryptSecret(
   secret: EncryptedSecret,
   passphrase: string,
 ): Promise<string> {
-  const key = deriveKey(passphrase, fromBase64(secret.salt));
   try {
+    // Everything that touches the persisted blob stays inside the try: a
+    // corrupt (non-base64) salt/iv/ciphertext throws the same friendly error
+    // as a wrong passphrase instead of a raw InvalidCharacterError.
+    const key = await deriveKey(passphrase, fromBase64(secret.salt));
     const plaintext = gcm(key, fromBase64(secret.iv)).decrypt(
       fromBase64(secret.ciphertext),
     );

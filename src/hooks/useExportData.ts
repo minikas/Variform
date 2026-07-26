@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { OutputFormats, TailwindOutput, TailwindUnit, TailwindColorMode } from "../types.d";
+import { useState, useEffect, useRef } from "react";
+import { MessageTypes, OutputFormats, TailwindOutput, TailwindUnit, TailwindColorMode } from "../types.d";
 import { formatExtension } from "../utils/formatExtension";
 import { useSelection } from "../contexts/SelectionContext";
 import { hasAnySelection } from "../utils/selectionState";
@@ -11,6 +11,29 @@ interface UseExportDataProps {
 
 /** Debounce before re-running the export, so rapid selection toggles coalesce. */
 const EXPORT_DEBOUNCE_MS = 150;
+
+/** Counter for tagging export requests (same pattern as utils/pluginBridge). */
+let nextExportRequestId = 0;
+
+/**
+ * Decides whether an export result/error arriving from the plugin answers a
+ * superseded request and must be discarded. Prefers the echoed requestId
+ * (unique per request, so even same-format races are caught); falls back to
+ * comparing the echoed format with the current one for messages without a
+ * requestId — a slow JSON export resolving after switching to CSS must not
+ * write JSON into the CSS preview.
+ */
+export const isStaleExportResult = (
+    messageRequestId: string | undefined,
+    messageFormat: OutputFormats | undefined,
+    pendingRequestId: string | null,
+    currentFormat: OutputFormats
+): boolean => {
+    if (pendingRequestId && messageRequestId) {
+        return messageRequestId !== pendingRequestId;
+    }
+    return messageFormat !== currentFormat;
+};
 
 interface UseExportDataReturn {
     filename: string;
@@ -85,10 +108,23 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
     // when at least one collection/mode is picked, or when a style kind is on.
     const canExport = !!exportedData && (!isInitialised || hasAnySelection(selection) || anyStyleSelected(styleSelection));
 
+    // Refs so the message handler always sees the latest values regardless of
+    // when its effect last ran.
+    const formatRef = useRef(format);
+    formatRef.current = format;
+    /** RequestId of the export currently in flight (null before the first one). */
+    const pendingExportRequestIdRef = useRef<string | null>(null);
+
     const handleExport = () => {
+        // Tag each request so late responses to superseded exports (e.g. a
+        // slow JSON export resolving after switching to CSS) can be discarded
+        // instead of overwriting the preview with the wrong format's data.
+        const requestId = `export:${nextExportRequestId++}`;
+        pendingExportRequestIdRef.current = requestId;
         parent.postMessage({
             pluginMessage: {
-                type: "EXPORT.SUCCESS" as any,
+                type: MessageTypes.EXPORT_SUCCESS,
+                requestId,
                 format,
                 useLinkedVarRowAndColPos: format === OutputFormats.CSV ? useRowColumnPos : false,
                 useTailwindFormat: format === OutputFormats.CSS ? useTailwindFormat : false,
@@ -126,16 +162,23 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
 
     useEffect(() => {
         window.onmessage = ({ data: { pluginMessage } }) => {
-            if (pluginMessage.type === "INFO.BASIC_INFO") {
+            if (pluginMessage.type === MessageTypes.BASIC_INFO) {
                 setVariablesCount(pluginMessage.count);
-            } else if (pluginMessage.type === "EXPORT.SUCCESS.RESULT") {
+            } else if (pluginMessage.type === MessageTypes.EXPORT_SUCCESS_RESULT) {
+                // Drop late responses to superseded requests (see handleExport).
+                if (isStaleExportResult(pluginMessage.requestId, pluginMessage.format, pendingExportRequestIdRef.current, formatRef.current)) {
+                    return;
+                }
                 setExportedData(pluginMessage.data);
                 setIsExporting(false);
-            } else if (pluginMessage.type === "EXPORT.ERROR") {
+            } else if (pluginMessage.type === MessageTypes.EXPORT_ERROR) {
+                if (isStaleExportResult(pluginMessage.requestId, pluginMessage.format, pendingExportRequestIdRef.current, formatRef.current)) {
+                    return;
+                }
                 setIsExporting(false);
             }
         };
-    }, [filename, format, useDSCGFormat]);
+    }, []);
 
     // Auto-export from the current selection: runs on mount and whenever the
     // format, a format-specific option, or the collection/mode/styles selection
@@ -152,7 +195,7 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
     // Request basic info on mount (only if not already received)
     useEffect(() => {
         if (variablesCount === 0) {
-            parent.postMessage({ pluginMessage: { type: "INFO.GET_BASIC_INFO" as any } }, "*");
+            parent.postMessage({ pluginMessage: { type: MessageTypes.GET_BASIC_INFO } }, "*");
         }
     }, [variablesCount]);
 

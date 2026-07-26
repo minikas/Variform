@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { exportToAndroid, rgbaToArgbHex } from "./collectionToAndroid";
+import { exportToAndroid } from "./collectionToAndroid";
+import { rgbaToArgbHex } from "./color";
 
 /* ----------------------------- pure functions ---------------------------- */
 
@@ -140,9 +141,9 @@ describe("exportToAndroid", () => {
     const result = await exportToAndroid();
 
     expect(result).toContain('<dimen name="spacing_4">16dp</dimen>');
-    // "Font Size/Body" categorizes as spacing (the 'size' heuristic wins over
-    // 'font'), so it lands in the spacing family with dp, not sp.
-    expect(result).toContain('<dimen name="spacing_font_size_body">14dp</dimen>');
+    // "Font Size/Body" categorizes as fontSize (the typography branch wins
+    // over the generic size branch), so it lands in sp, not dp.
+    expect(result).toContain('<dimen name="font_size_body">14sp</dimen>');
   });
 
   it("emits STRING values as escaped <string> resources", async () => {
@@ -227,5 +228,113 @@ describe("exportToAndroid", () => {
     expect(result.split("<resources>").length - 1).toBe(1);
     expect(result).not.toContain("values-night");
     expect(result).not.toContain("Move this block");
+  });
+
+  it("lists the used modes in the header", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToAndroid();
+
+    expect(result).toContain("<!-- Modes: Primitives → Light -->");
+  });
+
+  it("escapes a leading @ (resource reference) and backslashes in <string> values", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["ref", "path"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            ref: {
+              name: "Copy/Ref",
+              resolvedType: "STRING",
+              variableCollectionId: "c1",
+              valuesByMode: { L: "@string/foo" },
+            },
+            path: {
+              name: "Copy/Path",
+              resolvedType: "STRING",
+              variableCollectionId: "c1",
+              valuesByMode: { L: "C:\\assets\\icon" },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToAndroid();
+
+    // A leading @ makes aapt resolve the value as a resource reference and
+    // fail; it must be escaped to \@. Raw backslashes must double so they
+    // survive aapt's own escape processing.
+    expect(result).toContain('<string name="other_copy_ref">\\@string/foo</string>');
+    expect(result).toContain('<string name="other_copy_path">C:\\\\assets\\\\icon</string>');
+  });
+
+  it("suffixes duplicate resource names so aapt sees no redeclaration", async () => {
+    (globalThis as any).figma = {
+      variables: {
+        getLocalVariableCollectionsAsync: async () => [
+          {
+            id: "c1",
+            name: "Primitives",
+            modes: [{ name: "Light", modeId: "L" }],
+            variableIds: ["a", "b"],
+          },
+        ],
+        getVariableByIdAsync: async (id: string) =>
+          ({
+            a: {
+              name: "Colors/Blue 500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 1, a: 1 } },
+            },
+            b: {
+              name: "Colors/Blue-500",
+              resolvedType: "COLOR",
+              variableCollectionId: "c1",
+              valuesByMode: { L: { r: 0, g: 0, b: 0.5, a: 1 } },
+            },
+          } as any)[id] ?? null,
+        getVariableCollectionByIdAsync: async () => null,
+      },
+    };
+    const result = await exportToAndroid();
+
+    // Both names sanitize to colors_blue_500; the second gets a numeric
+    // suffix instead of a duplicate resource (an aapt error).
+    expect(result).toContain('<color name="colors_blue_500">#FF0000FF</color>');
+    expect(result).toContain('<color name="colors_blue_500_2">#FF000080</color>');
+    expect(result.match(/name="colors_blue_500"/g)?.length).toBe(1);
+  });
+
+  it("keeps colliding mode names as separate blocks with valid output", async () => {
+    const mock = makeFigmaMock({ name: "Dark Mode", modeId: "DM" });
+    mock.variables.getLocalVariableCollectionsAsync = async () => [
+      {
+        id: "c1",
+        name: "Primitives",
+        modes: [
+          { name: "Light", modeId: "L" },
+          { name: "Dark Mode", modeId: "DM" },
+          { name: "Dark-Mode", modeId: "DM2" },
+        ],
+        variableIds: ["blue500", "overlayDim", "spacing4", "fontSizeBody", "familySans", "bgPrimary", "welcome"],
+      },
+    ];
+    (globalThis as any).figma = mock;
+    const result = await exportToAndroid();
+
+    // "Dark Mode" and "Dark-Mode" produce no qualifier collision: each mode
+    // stays its own flagged block and resource names appear once per block.
+    expect(result.split("<resources>").length - 1).toBe(3);
+    expect(result).toContain('<!-- No Android resource qualifier exists for mode "Dark Mode": map it manually');
+    expect(result).toContain('<!-- No Android resource qualifier exists for mode "Dark-Mode": map it manually');
+    expect(result.match(/name="colors_blue_500"/g)?.length).toBe(3);
   });
 });

@@ -1,6 +1,6 @@
 import { rgbToTailwindColor } from "./color";
 import { toCssVar } from "./stringTransformation";
-import { getLocalStyles, stylesToTailwindTokens, filterStyles } from "./styleSerializers";
+import { getLocalStyles, stylesToTailwindTokens, filterStyles, sanitizeCssComment } from "./styleSerializers";
 import { isCollectionSelected, selectedModes } from "./selectionUtils";
 import { ALL_STYLES, anyStyleSelected } from "./styleSelection";
 import type { ExportSelection, StyleSelection, TailwindUnit } from "../types.d";
@@ -34,17 +34,41 @@ export function formatTailwindLength(value: number, unit: TailwindUnit = "px"): 
 export function detectTailwindCategory(name: string, resolvedType: string): string {
     const lowerName = name.toLowerCase();
 
-    // Auto-detect color variables
+    // Auto-detect color variables. NOTE: "border" and "text" are NOT color
+    // keywords — they belong to the sizing/typography categories below
+    // ("Border/Width" is a length, "Text/Size" is a font size).
     if (resolvedType === "COLOR" ||
         lowerName.includes('color') ||
         lowerName.includes('primary') ||
         lowerName.includes('secondary') ||
         lowerName.includes('accent') ||
         lowerName.includes('background') ||
-        lowerName.includes('foreground') ||
-        lowerName.includes('border') ||
-        lowerName.includes('text')) {
+        lowerName.includes('foreground')) {
         return "color";
+    }
+
+    // Auto-detect typography variables. This branch runs BEFORE the generic
+    // size branch so that "Text/Size" classifies as a font size instead of a
+    // plain length (the old order made the font-size branch unreachable).
+    if (lowerName.includes('font') ||
+        lowerName.includes('text') ||
+        lowerName.includes('line') ||
+        lowerName.includes('letter') ||
+        lowerName.includes('weight')) {
+        if (lowerName.includes('family')) {
+            return "font-family";
+        } else if (lowerName.includes('weight')) {
+            return "font-weight";
+        } else if (lowerName.includes('size')) {
+            return "font-size";
+        } else if (lowerName.includes('line')) {
+            return "line-height";
+        } else if (lowerName.includes('letter')) {
+            return "letter-spacing";
+        } else if (lowerName.includes('font')) {
+            return "font-family";
+        }
+        return "font";
     }
 
     // Auto-detect spacing/size variables
@@ -56,33 +80,13 @@ export function detectTailwindCategory(name: string, resolvedType: string): stri
         return "spacing";
     }
 
-    // Auto-detect size variables
+    // Auto-detect size variables (border widths are lengths, not colors)
     if (lowerName.includes('size') ||
         lowerName.includes('width') ||
         lowerName.includes('height') ||
         lowerName.includes('radius') ||
         lowerName.includes('border')) {
         return "size";
-    }
-
-    // Auto-detect typography variables
-    if (lowerName.includes('font') ||
-        lowerName.includes('text') ||
-        lowerName.includes('line') ||
-        lowerName.includes('letter') ||
-        lowerName.includes('weight')) {
-        if (lowerName.includes('family') || lowerName.includes('font')) {
-            return "font-family";
-        } else if (lowerName.includes('size')) {
-            return "font-size";
-        } else if (lowerName.includes('weight')) {
-            return "font-weight";
-        } else if (lowerName.includes('line')) {
-            return "line-height";
-        } else if (lowerName.includes('letter')) {
-            return "letter-spacing";
-        }
-        return "font";
     }
 
     // Auto-detect animation/transition variables
@@ -131,7 +135,7 @@ function toV4Namespace(category: string, name: string): string {
 }
 
 /** v4 namespaces whose FLOAT values are lengths (emitted in the chosen unit). */
-const LENGTH_NAMESPACES = new Set(["spacing", "radius", "text", "tracking"]);
+const LENGTH_NAMESPACES = new Set(["spacing", "radius", "text", "tracking", "leading"]);
 
 /**
  * Transforms variable names to Tailwind CSS v4+ conventions
@@ -148,9 +152,9 @@ export function transformToTailwindName(name: string, resolvedType: string, pref
 
 /**
  * Formats a FLOAT variable according to its v4 theme namespace: length
- * namespaces (spacing, radius, text, tracking) use the chosen unit, durations
- * are milliseconds and everything else (font-weight, opacity, ...) stays a
- * unitless number — appending "px" there would produce invalid values.
+ * namespaces (spacing, radius, text, tracking, leading) use the chosen unit,
+ * durations are milliseconds and everything else (font-weight, opacity, ...)
+ * stays a unitless number — appending "px" there would produce invalid values.
  * @param name - Original variable name
  * @param resolvedType - Type of the variable
  * @param value - The numeric value
@@ -162,6 +166,20 @@ function formatTailwindNumber(name: string, resolvedType: string, value: number,
     if (LENGTH_NAMESPACES.has(namespace)) return formatTailwindLength(value, unit);
     if (namespace === "duration") return `${value}ms`;
     return String(value);
+}
+
+/**
+ * Escapes a STRING value for safe interpolation inside a double-quoted CSS
+ * string (backslashes first, then quotes and line breaks).
+ * @param value - The raw string value
+ * @returns The escaped string (without the surrounding quotes)
+ */
+function escapeCssString(value: string): string {
+    return value
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r");
 }
 
 /**
@@ -186,7 +204,24 @@ async function processCollection(
     const customVariants: string[] = [];
     const validTypes = new Set(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
 
-    for(const mode of selectedModes(collection.id, collection.modes, selection)) {
+    const modes = selectedModes(collection.id, collection.modes, selection);
+
+    // Classify modes: the first Light/Default/Mode 1 mode holds the @theme
+    // defaults and the first Dark mode goes into a prefers-color-scheme media
+    // query; anything else becomes a [data-theme] override block plus a
+    // matching @custom-variant. When no selected mode classifies as root
+    // (e.g. a Dark-only selection or a Desktop/Mobile collection), the FIRST
+    // selected mode becomes the default — mirroring the preset strategy — so
+    // the @theme block is never empty.
+    const isRootName = (name: string) => {
+        const normalized = name.trim().toLowerCase();
+        return normalized === 'default' || normalized === 'mode 1' || normalized === 'light';
+    };
+    const isDarkName = (name: string) => name.trim().toLowerCase() === 'dark';
+    const rootIndex = Math.max(0, modes.findIndex((mode) => isRootName(mode.name)));
+    const darkIndex = modes.findIndex((mode, index) => index !== rootIndex && isDarkName(mode.name));
+
+    for (const [modeIndex, mode] of modes.entries()) {
         let cssVars: string[] = [];
 
         for (const variableId of variableIds) {
@@ -211,7 +246,10 @@ async function processCollection(
                             cssValue = `var(${linkedName})`;
                         }
                         else {
-                            cssValue = "initial";
+                            // Broken alias: skip the declaration (like the
+                            // preset does) instead of emitting `initial`.
+                            cssVars.push(`  /* unresolved alias: ${tailwindVarName} */`);
+                            continue;
                         }
                     }
                     else {
@@ -221,24 +259,17 @@ async function processCollection(
                                 ? formatTailwindNumber(name, resolvedType, parseFloat(value as string), unit)
                                 : isBool
                                     ? Boolean(value) ? '1' : '0'
-                                    : `"${String(value)}"`;
+                                    : `"${escapeCssString(String(value))}"`;
                     }
-                    cssVars.push(`  ${tailwindVarName}: ${cssValue};${description ? `\t/* ${description} */` : ''}`);
+                    cssVars.push(`  ${tailwindVarName}: ${cssValue};${description ? `\t/* ${sanitizeCssComment(description)} */` : ''}`);
                 }
             }
         }
 
-        // Classify modes: Light/Default/Mode 1 are the @theme defaults, Dark
-        // goes into a prefers-color-scheme media query, anything else becomes
-        // a [data-theme] override block plus a matching @custom-variant.
-        const normalizedMode = mode.name.trim().toLowerCase();
-        const isRoot = normalizedMode === 'default' || normalizedMode === 'mode 1' || normalizedMode === 'light';
-        const isDark = normalizedMode === 'dark';
-
-        if (isRoot) {
+        if (modeIndex === rootIndex) {
             themeVars.push(...cssVars);
         }
-        else if (isDark) {
+        else if (modeIndex === darkIndex) {
             darkVars.push(...cssVars);
         }
         else {
@@ -272,22 +303,24 @@ export const exportToTailwind = async (
     try {
         const themeVars = new Set<string>();  // Use Set to avoid duplicates
         const darkVars = new Set<string>();   // "Dark" mode vars → media query
-        const themeBlocks: string[] = [];     // Other modes → [data-theme] blocks
-        const customVariants: string[] = [];
+        // Sets also dedupe: collections sharing a mode name would otherwise
+        // emit duplicate @custom-variant directives and identical blocks.
+        const themeBlocks = new Set<string>();   // Other modes → [data-theme] blocks
+        const customVariants = new Set<string>();
 
         for(const collection of collections) {
             if (!isCollectionSelected(collection.id, selection)) continue;
             const { theme, dark, themeBlocks: blocks, variants } = await processCollection(collection, selection, prefix, unit);
             theme.forEach(v => themeVars.add(v));
             dark.forEach(v => darkVars.add(v));
-            themeBlocks.push(...blocks);
-            customVariants.push(...variants);
+            blocks.forEach(b => themeBlocks.add(b));
+            variants.forEach(v => customVariants.add(v));
         }
 
         // Merge the selected local style kinds into the same @theme block
         if (anyStyleSelected(styleSelection)) {
             const styles = filterStyles(await getLocalStyles(), styleSelection);
-            stylesToTailwindTokens(styles).forEach(token => themeVars.add(token));
+            stylesToTailwindTokens(styles, prefix, unit).forEach(token => themeVars.add(token));
         }
 
         // Create @theme block with all variables and styles

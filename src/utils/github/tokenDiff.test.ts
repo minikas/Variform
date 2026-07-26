@@ -23,6 +23,28 @@ describe("flattenJson", () => {
   it("returns null for invalid JSON", () => {
     expect(flattenJson("{ not json")).toBeNull();
   });
+
+  it("does not collide when a key itself contains a dot", () => {
+    // {"a":{"b":1}} and {"a.b":1} must not both flatten to the "a.b" key.
+    const nested = flattenJson('{"a":{"b":1}}');
+    const dotted = flattenJson('{"a.b":1}');
+    expect(nested?.get("a.b")).toBe("1");
+    expect(dotted?.get("a\\.b")).toBe("1");
+    expect(nested?.size).toBe(1);
+    expect(dotted?.size).toBe(1);
+
+    const merged = flattenJson('{"a":{"b":1},"a.b":2}');
+    expect(merged?.size).toBe(2);
+    expect(merged?.get("a.b")).toBe("1");
+    expect(merged?.get("a\\.b")).toBe("2");
+  });
+
+  it("does not collide between a literal bracket key and an array index", () => {
+    const map = flattenJson('{"sizes[0]":8,"sizes":[16]}');
+    expect(map?.get("sizes\\[0\\]")).toBe("8");
+    expect(map?.get("sizes[0]")).toBe("16");
+    expect(map?.size).toBe(2);
+  });
 });
 
 describe("parseCssVars", () => {
@@ -41,6 +63,42 @@ describe("parseCssVars", () => {
     const map = parseCssVars(css);
     expect(map.get(":root | --gap")).toBe("4px");
     expect(map.size).toBe(1);
+  });
+
+  it("parses the last declaration of a block even without a trailing semicolon", () => {
+    const css = `:root { --gap: 4px; --color-primary: #fff }`;
+    const map = parseCssVars(css);
+    expect(map.get(":root | --gap")).toBe("4px");
+    expect(map.get(":root | --color-primary")).toBe("#fff");
+    expect(map.size).toBe(2);
+  });
+
+  it("does not split declarations on semicolons inside quoted strings", () => {
+    const css = `:root { --font-stack: "Inter; fallback", sans-serif; --gap: 4px; }`;
+    const map = parseCssVars(css);
+    expect(map.get(":root | --font-stack")).toBe('"Inter; fallback", sans-serif');
+    expect(map.get(":root | --gap")).toBe("4px");
+    expect(map.size).toBe(2);
+  });
+
+  it("does not corrupt the selector stack on braces inside quoted strings", () => {
+    const css = `:root { --icon: url("a{b}c.svg"); --gap: 4px; }
+    .dark { --gap: 8px; }`;
+    const map = parseCssVars(css);
+    expect(map.get(":root | --icon")).toBe('url("a{b}c.svg")');
+    expect(map.get(":root | --gap")).toBe("4px");
+    // The ".dark" block must nest under nothing — a corrupted stack would
+    // have kept stray selectors around.
+    expect(map.get(".dark | --gap")).toBe("8px");
+    expect(map.size).toBe(3);
+  });
+
+  it("handles escaped quotes inside strings", () => {
+    const css = `:root { --quote: "a\\";b"; --gap: 4px; }`;
+    const map = parseCssVars(css);
+    expect(map.get(":root | --quote")).toBe('"a\\";b"');
+    expect(map.get(":root | --gap")).toBe("4px");
+    expect(map.size).toBe(2);
   });
 });
 

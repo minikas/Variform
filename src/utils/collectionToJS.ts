@@ -2,9 +2,10 @@ import { rgbToCssColor } from "./color";
 import { toCamelCase } from "./stringTransformation";
 import { getMatchingModeName } from "./variableUtils";
 import { getLocalStyles, stylesToJsStatements, filterStyles } from "./styleSerializers";
-import { isCollectionSelected, selectedModes } from "./selectionUtils";
+import { isCollectionSelected, isModeSelected, selectedModes } from "./selectionUtils";
 import { ALL_STYLES, anyStyleSelected } from "./styleSelection";
 import { applyDescriptionParser } from "./descriptionParsers";
+import { RESERVED_WORDS } from "./jsSerialize";
 import type { ExportSelection, StyleSelection } from "../types.d";
 
 /** Matches a valid JavaScript identifier (safe to emit unquoted) */
@@ -22,11 +23,12 @@ const ALIAS_MARKER = "\u0000";
 /**
  * Converts a collection name into a valid JS identifier for the exported const
  * @param name - The collection name
- * @returns A camelCased name, prefixed with `_` when it is not a valid identifier
+ * @returns A camelCased name, prefixed with `_` when it is not a valid
+ *   identifier or is a reserved word (`export const default` is a SyntaxError)
  */
 const toSafeConstName = (name: string): string => {
   const camel = toCamelCase(name);
-  return IDENTIFIER_RE.test(camel) ? camel : `_${camel}`;
+  return IDENTIFIER_RE.test(camel) && !RESERVED_WORDS.has(camel) ? camel : `_${camel}`;
 };
 
 /**
@@ -50,16 +52,22 @@ const formatValue = (value: VariableValue, resolvedType: string) =>
  * emitted (same-collection aliases would be self-references inside the
  * const's own initializer; unexported collections would dangle). Guards
  * against cycles and broken links with the '_unlinked' fallback.
+ *
+ * The mode is resolved hop by hop: each linked variable may live in a
+ * different collection whose mode ids differ from the source collection's,
+ * so carrying a raw modeId across hops would read an arbitrary mode.
  * @param variableId - The aliased variable id to start from
- * @param modeId - The mode to resolve the value in
+ * @param modeName - The name of the mode to resolve the value in
  * @param resolvedType - The resolved type used to format the final value
+ * @param selection - Optional export selection used for mode fallback
  * @param seen - Variable ids already visited (cycle guard)
  * @returns The processed scalar value, or '_unlinked'
  */
 const resolveAliasValue = async (
   variableId: string,
-  modeId: string,
+  modeName: string,
   resolvedType: string,
+  selection?: ExportSelection,
   seen: Set<string> = new Set()
 ): Promise<string | number | boolean> => {
   if (seen.has(variableId)) return "_unlinked";
@@ -68,10 +76,15 @@ const resolveAliasValue = async (
   const linked = await figma.variables.getVariableByIdAsync(variableId);
   if (!linked) return "_unlinked";
 
-  const value: VariableValue = linked.valuesByMode[modeId] ?? Object.values(linked.valuesByMode)[0];
+  const linkedCollection = await figma.variables.getVariableCollectionByIdAsync(linked.variableCollectionId);
+  const matchedModeId = linkedCollection
+    ? linkedCollection.modes.find((m) => m.name === getMatchingModeName(modeName, linkedCollection, selection))?.modeId
+    : undefined;
+  const value: VariableValue = (matchedModeId ? linked.valuesByMode[matchedModeId] : undefined)
+    ?? Object.values(linked.valuesByMode)[0];
   if (value === undefined) return "_unlinked";
   if (typeof value === "object" && "type" in value && value.type === "VARIABLE_ALIAS") {
-    return resolveAliasValue(value.id, modeId, resolvedType, seen);
+    return resolveAliasValue(value.id, modeName, resolvedType, selection, seen);
   }
   return formatValue(value, resolvedType);
 };
@@ -81,15 +94,17 @@ const resolveAliasValue = async (
  * @param collection - The variable collection to process
  * @param selection - Optional export selection used to filter the modes
  * @param parserId - Optional description parser id
+ * @param constNames - Deduplicated const name per selected collection id
  * @returns The exported const name, the nested object for the collection,
  *   and the const names of other collections its aliases reference
  */
 async function processCollection(
     collection: VariableCollection,
-    selection?: ExportSelection,
-    parserId?: string
+    selection: ExportSelection | undefined,
+    parserId: string | undefined,
+    constNames: Map<string, string>
 ): Promise<{ varName: string; variables: Record<string, any>; referencedCollections: Set<string> }> {
-  const { name: collectionName, variableIds } = collection;
+  const { variableIds } = collection;
   const validTypes = new Set(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
   const variables: Record<string, any> = {};
   const referencedCollections = new Set<string>();
@@ -117,28 +132,35 @@ async function processCollection(
 
                 if (linkedVar) {
                   const linkedVarCollection = await figma.variables.getVariableCollectionByIdAsync(linkedVar.variableCollectionId);
-                  // References are only valid across collections that are part
-                  // of the export: a same-collection path would be a
+                  // References are only valid when the alias target is part of
+                  // the export: a same-collection path would be a
                   // self-reference inside the const's own initializer (TDZ
-                  // crash), and an unexported collection would dangle. In both
+                  // crash), and an unexported collection — or a collection
+                  // whose resolved mode is deselected — would dangle. In those
                   // cases the alias chain is resolved to its concrete value.
+                  const matchedModeName = linkedVarCollection
+                    ? getMatchingModeName(mode.name, linkedVarCollection, selection)
+                    : undefined;
+                  const matchedModeId = linkedVarCollection && matchedModeName !== undefined
+                    ? linkedVarCollection.modes.find((m) => m.name === matchedModeName)?.modeId
+                    : undefined;
                   const canReference = linkedVarCollection !== null
                     && linkedVarCollection.id !== collection.id
-                    && isCollectionSelected(linkedVarCollection.id, selection);
+                    && isCollectionSelected(linkedVarCollection.id, selection)
+                    && matchedModeId !== undefined
+                    && isModeSelected(linkedVarCollection.id, matchedModeId, selection);
 
-                  if (canReference && linkedVarCollection) {
-                    const linkedConstName = toSafeConstName(linkedVarCollection.name);
-                    const matchedModeName = getMatchingModeName(mode.name, linkedVarCollection);
-                    const aliasPath = `${linkedConstName}.${toCamelCase(matchedModeName)}.${linkedVar.name.split('/').map((str) => toCamelCase(str)).join('.')}.value`;
+                  if (canReference) {
+                    // canReference guarantees the linked collection is
+                    // selected, so its deduplicated const name is registered
+                    const linkedConstName = constNames.get(linkedVarCollection!.id)!;
+                    const aliasPath = `${linkedConstName}.${toCamelCase(matchedModeName!)}.${linkedVar.name.split('/').map((str) => toCamelCase(str)).join('.')}.value`;
                     referencedCollections.add(linkedConstName);
                     currentObj[part] = description
                       ? { value: `${ALIAS_MARKER}${aliasPath}${ALIAS_MARKER}`, description: parsedDescription }
                       : { value: `${ALIAS_MARKER}${aliasPath}${ALIAS_MARKER}` };
                   } else {
-                    const matchedModeId = linkedVarCollection
-                      ? linkedVarCollection.modes.find((m) => m.name === getMatchingModeName(mode.name, linkedVarCollection))?.modeId ?? mode.modeId
-                      : mode.modeId;
-                    const resolved = await resolveAliasValue(value.id, matchedModeId, resolvedType);
+                    const resolved = await resolveAliasValue(value.id, mode.name, resolvedType, selection);
                     currentObj[part] = description
                       ? { value: resolved, description: parsedDescription }
                       : { value: resolved };
@@ -164,7 +186,7 @@ async function processCollection(
     }
   }
 
-  return { varName: toSafeConstName(collectionName), variables, referencedCollections };
+  return { varName: constNames.get(collection.id)!, variables, referencedCollections };
 }
 
 /**
@@ -177,7 +199,7 @@ async function processCollection(
 const toMemberExpression = (path: string): string =>
   path.split('.').reduce((acc, segment, index) => {
     if (index === 0) return segment; // const names are sanitized identifiers
-    return IDENTIFIER_RE.test(segment) ? `${acc}.${segment}` : `${acc}["${segment}"]`;
+    return IDENTIFIER_RE.test(segment) ? `${acc}.${segment}` : `${acc}[${JSON.stringify(segment)}]`;
   }, '');
 
 /**
@@ -191,10 +213,14 @@ const toMemberExpression = (path: string): string =>
 function serializeCollection(varName: string, variables: Record<string, any>, asConst: boolean = false): string {
   return `export const ${varName} = ${JSON.stringify(variables, null, 2)
     // Unquote marked alias references into real member expressions —
-    // plain string values keep their quotes
-    .replace(/"\\u0000(.+?)\\u0000"/g, (_match, path) => toMemberExpression(path))
-    // Unquote property keys that are valid identifiers, keep the rest quoted
-    .replace(/"([^"]+)":/g, (match, key) => IDENTIFIER_RE.test(key) ? `${key}:` : match)}${asConst ? " as const" : ""};\n`;
+    // plain string values keep their quotes. The captured path is still
+    // JSON-escaped (it lived inside a JSON string), so it is parsed back
+    // to its raw form before the member expression is rebuilt.
+    .replace(/"\\u0000(.+?)\\u0000"/g, (_match, path) => toMemberExpression(JSON.parse(`"${path}"`)))
+    // Unquote property keys that are valid identifiers, keep the rest quoted.
+    // Keys containing JSON escapes (quotes, backslashes) are left untouched:
+    // matching them would mangle the escape sequences.
+    .replace(/"([^"\\]+)":/g, (match, key) => IDENTIFIER_RE.test(key) ? `${key}:` : match)}${asConst ? " as const" : ""};\n`;
 }
 
 /**
@@ -214,10 +240,24 @@ export const buildJsModuleExports = async (
 ): Promise<string | undefined> => {
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
   try {
+    // Reserve unique const names up front so collections whose names
+    // camelCase to the same identifier ("My Tokens" vs "my-tokens") do not
+    // collide, and so alias references point at the final, deduplicated name
+    const constNames = new Map<string, string>();
+    for (const collection of collections) {
+      if (!isCollectionSelected(collection.id, selection)) continue;
+      const base = toSafeConstName(collection.name);
+      let name = base;
+      for (let suffix = 2; [...constNames.values()].includes(name); suffix++) {
+        name = `${base}${suffix}`;
+      }
+      constNames.set(collection.id, name);
+    }
+
     const entries: Array<{ varName: string; statement: string; referencedCollections: Set<string> }> = [];
     for (const collection of collections) {
       if (!isCollectionSelected(collection.id, selection)) continue;
-      const { varName, variables, referencedCollections } = await processCollection(collection, selection, parserId);
+      const { varName, variables, referencedCollections } = await processCollection(collection, selection, parserId, constNames);
       entries.push({ varName, statement: serializeCollection(varName, variables, asConst), referencedCollections });
     }
 
@@ -239,7 +279,14 @@ export const buildJsModuleExports = async (
     // Merge the selected local style kinds as additional exported consts
     if (anyStyleSelected(styleSelection)) {
       const styles = filterStyles(await getLocalStyles(), styleSelection);
-      const styleStatements = stylesToJsStatements(styles);
+      let styleStatements = stylesToJsStatements(styles, new Set(constNames.values()));
+      if (styleStatements && asConst) {
+        // stylesToJsStatements has no asConst option; append it per statement
+        styleStatements = styleStatements
+          .split("\n\n")
+          .map((statement) => statement.replace(/;$/, " as const;"))
+          .join("\n\n");
+      }
       if (styleStatements) {
         exports.push(styleStatements);
       }
