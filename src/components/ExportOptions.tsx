@@ -1,6 +1,7 @@
 import React from "react";
 import { Flex, Switch, Label, Select, Input } from "figma-kit";
 import { OutputFormats, TailwindColorMode, TailwindOutput, TailwindUnit } from "../types.d";
+import { formatExtension } from "../utils/formatExtension";
 import { SectionAccordion } from "./SectionAccordion";
 import { ParserSelect } from "./ParserSelect";
 import { FilenameInput } from "./FilenameInput";
@@ -60,13 +61,12 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
         format === OutputFormats.TS ||
         format === OutputFormats.CSV;
 
-    // The Tailwind format downloads as .css or .js depending on the output.
-    const effectiveFormat = showTailwindFormatOptions
-        ? (tailwindOutput === "preset" ? OutputFormats.JS : OutputFormats.CSS)
-        : format;
+    // Download/push extension (Tailwind resolves to css/js per output; some
+    // formats like Android/Flutter have extensions different from the enum).
+    const fileExtension = formatExtension(format, tailwindOutput);
 
     // The collapsed header shows the resulting output filename.
-    const optionsSummary = `${filename}.${effectiveFormat}`;
+    const optionsSummary = `${filename}.${fileExtension}`;
 
     return (
         <SectionAccordion label="Options" summary={optionsSummary}>
@@ -184,7 +184,7 @@ export const ExportOptions: React.FC<ExportOptionsProps> = ({
 
                 {/* Output filename */}
                 <FilenameInput
-                    format={effectiveFormat}
+                    extension={fileExtension}
                     filename={filename}
                     onFilenameChange={onFilenameChange}
                 />

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { detectTailwindCategory, exportToTailwind, formatTailwindLength } from "./collectionToTailwind";
+import { detectTailwindCategory, exportToTailwind, formatTailwindLength, transformToTailwindName } from "./collectionToTailwind";
 import { rgbToTailwindColor } from "./color";
 
 /* ----------------------------- color formatter --------------------------- */
@@ -35,6 +35,25 @@ describe("detectTailwindCategory", () => {
   });
 });
 
+/* --------------------------- v4 namespace mapping ------------------------ */
+
+describe("transformToTailwindName", () => {
+  it("maps categories to real Tailwind v4 theme namespaces", () => {
+    expect(transformToTailwindName("Colors/Blue/500", "COLOR")).toBe("--color-colors--blue--500");
+    expect(transformToTailwindName("Spacing/4", "FLOAT")).toBe("--spacing-spacing--4");
+    expect(transformToTailwindName("Font Family/Sans", "STRING")).toBe("--font-font-family--sans");
+    expect(transformToTailwindName("Weight/Bold", "FLOAT")).toBe("--font-weight-weight--bold");
+    expect(transformToTailwindName("Line/Tight", "FLOAT")).toBe("--leading-line--tight");
+    expect(transformToTailwindName("Letter/Wide", "FLOAT")).toBe("--tracking-letter--wide");
+    expect(transformToTailwindName("Shadow/SM", "STRING")).toBe("--shadow-shadow--sm");
+  });
+
+  it("splits the legacy size category into radius and spacing", () => {
+    expect(transformToTailwindName("Radius/SM", "FLOAT")).toBe("--radius-radius--sm");
+    expect(transformToTailwindName("Width/Container", "FLOAT")).toBe("--spacing-width--container");
+  });
+});
+
 /* ----------------------------- length formatter -------------------------- */
 
 describe("formatTailwindLength", () => {
@@ -64,6 +83,21 @@ function makeFigmaMock() {
     resolvedType: "FLOAT",
     valuesByMode: { M1: 16 },
   };
+  const weightBold = {
+    name: "Weight/Bold",
+    resolvedType: "FLOAT",
+    valuesByMode: { M1: 700 },
+  };
+  const opacityHalf = {
+    name: "Opacity/50",
+    resolvedType: "FLOAT",
+    valuesByMode: { M1: 0.5 },
+  };
+  const durationFast = {
+    name: "Duration/Fast",
+    resolvedType: "FLOAT",
+    valuesByMode: { M1: 150 },
+  };
   const surfaceCard = {
     name: "Surface/Card",
     resolvedType: "COLOR",
@@ -77,7 +111,7 @@ function makeFigmaMock() {
     id: "c1",
     name: "Primitives",
     modes: [{ name: "Mode 1", modeId: "M1" }],
-    variableIds: ["blue500", "spacing4"],
+    variableIds: ["blue500", "spacing4", "weightBold", "opacityHalf", "durationFast"],
   };
   const tokens = {
     id: "c2",
@@ -89,7 +123,7 @@ function makeFigmaMock() {
     ],
     variableIds: ["surfaceCard"],
   };
-  const vars: Record<string, any> = { blue500, spacing4, surfaceCard };
+  const vars: Record<string, any> = { blue500, spacing4, weightBold, opacityHalf, durationFast, surfaceCard };
   const collections: Record<string, any> = { c1: primitives, c2: tokens };
 
   return {
@@ -126,6 +160,20 @@ describe("exportToTailwind — prefix option", () => {
 
     const rem = await exportToTailwind(undefined, { text: false, paint: false, effect: false, grid: false }, "", "rem");
     expect(rem).toContain("--spacing-spacing--4: 1rem;");
+  });
+
+  it("keeps non-length numbers unitless and durations in ms", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwind(undefined, { text: false, paint: false, effect: false, grid: false });
+    expect(result).toContain("--font-weight-weight--bold: 700;");
+    expect(result).toContain("--opacity-opacity--50: 0.5;");
+    expect(result).toContain("--duration-duration--fast: 150ms;");
+  });
+
+  it("never emits the `import(` sequence (breaks the Figma plugin runtime)", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwind(undefined, { text: false, paint: false, effect: false, grid: false });
+    expect(result).not.toContain("import(");
   });
 });
 

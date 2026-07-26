@@ -175,13 +175,15 @@ Every export view includes **Connect GitHub…** / **Push to GitHub** next to th
 - [x] Tailwind CSS (v4, @theme)
 - [x] Tailwind Preset (v3, theme.extend)
 - [x] DTCG 2025.10
-- [ ] React Native / Expo
-- [ ] Tamagui
-- [ ] SCSS
-- [ ] Style Dictionary JSON
-- [ ] iOS Swift
-- [ ] Android
-- [ ] Flutter
+- [x] React Native / Expo
+- [x] Tamagui
+- [x] SCSS
+- [x] Style Dictionary JSON
+- [x] iOS Swift
+- [x] Android
+- [x] Flutter
+
+> **Themes:** dictionary-style exports (Tailwind preset, React Native, Tamagui, SCSS, Swift, Android, Flutter) use the first selected mode of each collection as the default theme and emit every additional selected mode (e.g. **Dark**) as a complete variant in the same file — `darkTheme` objects, `$theme-dark` maps, `TokensDark` classes, or `values-night` resource blocks. The DTCG export emits one token set per collection/mode.
 
 ## Tailwind Export
 
@@ -331,7 +333,14 @@ src/
 │   ├── collectionToCSS.ts
 │   ├── collectionToJS.ts
 │   ├── collectionToTailwind.ts    # Tailwind CSS v4 (@theme) export
-│   ├── collectionToTailwindPreset.ts  # Tailwind v3 preset (theme.extend) export
+│   ├── collectionToTailwindPreset.ts  # Tailwind v3 preset + shared collectTokens
+│   ├── collectionToReactNative.ts # React Native / Expo theme (as const)
+│   ├── collectionToTamagui.ts     # Tamagui createTokens config
+│   ├── collectionToSCSS.ts        # SCSS variables
+│   ├── collectionToStyleDictionary.ts  # Legacy Style Dictionary (CTI) JSON
+│   ├── collectionToSwift.ts       # iOS Swift enum
+│   ├── collectionToAndroid.ts     # Android resources.xml
+│   ├── collectionToFlutter.ts     # Flutter Dart class
 │   ├── descriptionParsers.ts
 │   ├── selectionUtils.ts      # Filters collections/modes by the export selection
 │   ├── selectionState.ts      # Pure selection reducers (toggle, tri-state, reconcile)

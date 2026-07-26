@@ -23,8 +23,10 @@ export function formatTailwindLength(value: number, unit: TailwindUnit = "px"): 
 
 /**
  * Detects the Tailwind theme category for a variable from its resolved type and
- * naming conventions. Returns the v4 theme-namespace segment (e.g. "color",
- * "spacing", "font-size") or "" when no pattern matches.
+ * naming conventions. Returns the internal category segment (e.g. "color",
+ * "spacing", "font-size") or "" when no pattern matches. The segment is
+ * translated to the actual Tailwind v4 theme namespace by
+ * {@link transformToTailwindName}.
  * @param name - Original variable name
  * @param resolvedType - Type of the variable
  * @returns Tailwind category segment, or "" as fallback
@@ -107,6 +109,31 @@ export function detectTailwindCategory(name: string, resolvedType: string): stri
 }
 
 /**
+ * Maps an internal category segment to the actual Tailwind CSS v4 theme
+ * namespace. v4 dropped several v3-style scales, so the typography and sizing
+ * categories are translated: font families live in `--font-*`, font sizes in
+ * `--text-*`, line heights in `--leading-*`, letter spacing in `--tracking-*`,
+ * radii in `--radius-*` and generic width/height/size tokens in `--spacing-*`
+ * (which drives the `w-*`, `h-*` and `size-*` utilities in v4).
+ * @param category - Category from {@link detectTailwindCategory}
+ * @param name - Original variable name (used to split size vs radius)
+ * @returns Tailwind v4 theme-namespace segment
+ */
+function toV4Namespace(category: string, name: string): string {
+    switch (category) {
+        case "font-family": return "font";
+        case "font-size": return "text";
+        case "line-height": return "leading";
+        case "letter-spacing": return "tracking";
+        case "size": return name.toLowerCase().includes("radius") ? "radius" : "spacing";
+        default: return category;
+    }
+}
+
+/** v4 namespaces whose FLOAT values are lengths (emitted in the chosen unit). */
+const LENGTH_NAMESPACES = new Set(["spacing", "radius", "text", "tracking"]);
+
+/**
  * Transforms variable names to Tailwind CSS v4+ conventions
  * @param name - Original variable name
  * @param resolvedType - Type of the variable
@@ -114,9 +141,27 @@ export function detectTailwindCategory(name: string, resolvedType: string): stri
  * @returns Transformed name following Tailwind conventions
  */
 export function transformToTailwindName(name: string, resolvedType: string, prefix: string = ""): string {
-    const category = detectTailwindCategory(name, resolvedType);
+    const namespace = toV4Namespace(detectTailwindCategory(name, resolvedType), name);
     const prefixSegment = prefix ? `${toCssVar(prefix)}-` : "";
-    return `--${category ? `${category}-` : ""}${prefixSegment}${toCssVar(name)}`;
+    return `--${namespace ? `${namespace}-` : ""}${prefixSegment}${toCssVar(name)}`;
+}
+
+/**
+ * Formats a FLOAT variable according to its v4 theme namespace: length
+ * namespaces (spacing, radius, text, tracking) use the chosen unit, durations
+ * are milliseconds and everything else (font-weight, opacity, ...) stays a
+ * unitless number — appending "px" there would produce invalid values.
+ * @param name - Original variable name
+ * @param resolvedType - Type of the variable
+ * @param value - The numeric value
+ * @param unit - Length unit for length-valued tokens
+ * @returns The formatted value string
+ */
+function formatTailwindNumber(name: string, resolvedType: string, value: number, unit: TailwindUnit): string {
+    const namespace = toV4Namespace(detectTailwindCategory(name, resolvedType), name);
+    if (LENGTH_NAMESPACES.has(namespace)) return formatTailwindLength(value, unit);
+    if (namespace === "duration") return `${value}ms`;
+    return String(value);
 }
 
 /**
@@ -173,7 +218,7 @@ async function processCollection(
                         cssValue = isColor
                             ? rgbToTailwindColor(value as RGBA)
                             : isNumber
-                                ? formatTailwindLength(parseFloat(value as string), unit)
+                                ? formatTailwindNumber(name, resolvedType, parseFloat(value as string), unit)
                                 : isBool
                                     ? Boolean(value) ? '1' : '0'
                                     : `"${String(value)}"`;

@@ -67,7 +67,14 @@ export enum OutputFormats {
   CSS = "css",
   JS = "js",
   TS = "ts",
-  TAILWIND = "tailwind"
+  TAILWIND = "tailwind",
+  REACT_NATIVE = "react-native",
+  TAMAGUI = "tamagui",
+  SCSS = "scss",
+  STYLE_DICTIONARY = "style-dictionary",
+  SWIFT = "swift",
+  ANDROID = "android",
+  FLUTTER = "flutter"
 }
 
 /**

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { OutputFormats, TailwindOutput, TailwindUnit, TailwindColorMode } from "../types.d";
+import { formatExtension } from "../utils/formatExtension";
 import { useSelection } from "../contexts/SelectionContext";
 import { hasAnySelection } from "../utils/selectionState";
 import { anyStyleSelected } from "../utils/styleSelection";
@@ -28,8 +29,8 @@ interface UseExportDataReturn {
     setTailwindUnit: (tailwindUnit: TailwindUnit) => void;
     tailwindColorMode: TailwindColorMode;
     setTailwindColorMode: (tailwindColorMode: TailwindColorMode) => void;
-    /** Format used as file extension (Tailwind resolves to css/js per output). */
-    effectiveFormat: OutputFormats;
+    /** Extension used when downloading/pushing (e.g. "css", "xml", "dart"). */
+    fileExtension: string;
     exportedData: string;
     setExportedData: (data: string) => void;
     canExport: boolean;
@@ -113,14 +114,13 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         URL.revokeObjectURL(url);
     };
 
-    // The Tailwind format downloads as .css or .js depending on the chosen output.
-    const effectiveFormat = format === OutputFormats.TAILWIND
-        ? (tailwindOutput === "preset" ? OutputFormats.JS : OutputFormats.CSS)
-        : format;
+    // Download/push extension (Tailwind resolves to css/js per output; some
+    // formats like Android/Flutter have extensions different from the enum).
+    const fileExtension = formatExtension(format, tailwindOutput);
 
     const handleDownload = () => {
         if (exportedData) {
-            downloadFile(exportedData, effectiveFormat, filename);
+            downloadFile(exportedData, fileExtension, filename);
         }
     };
 
@@ -173,7 +173,7 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setTailwindUnit,
         tailwindColorMode,
         setTailwindColorMode,
-        effectiveFormat,
+        fileExtension,
         exportedData,
         setExportedData,
         canExport,

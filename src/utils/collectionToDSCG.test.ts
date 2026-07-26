@@ -56,10 +56,11 @@ describe("formatDscgValue", () => {
     });
   });
 
-  it("rounds floats to a number, stringifies booleans, passes strings", () => {
+  it("rounds floats to a number, keeps booleans as booleans, passes strings", () => {
     expect(formatDscgValue("FLOAT", 16)).toBe(16);
     expect(formatDscgValue("FLOAT", 1.23456)).toBe(1.235);
-    expect(formatDscgValue("BOOLEAN", true)).toBe("true");
+    expect(formatDscgValue("BOOLEAN", true)).toBe(true);
+    expect(formatDscgValue("BOOLEAN", false)).toBe(false);
     expect(formatDscgValue("STRING", "Inter")).toBe("Inter");
   });
 });
@@ -523,5 +524,12 @@ describe("exportToDSCG (end-to-end with a Figma mock)", () => {
     ]);
     expect(result.$themes).toEqual([]);
     expect(result.$metadata.tokenSetOrder).toEqual(setNames);
+  });
+
+  it('never contains the sequence "import(" (breaks the Figma plugin runtime)', async () => {
+    (globalThis as any).figma = makeFigmaMock();
+
+    const raw = (await exportToDSCG()) as string;
+    expect(raw).not.toContain("import(");
   });
 });

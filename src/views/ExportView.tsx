@@ -32,6 +32,20 @@ const formatLabel = (format: OutputFormats): string => {
             return "Tailwind";
         case OutputFormats.TS:
             return "TypeScript";
+        case OutputFormats.REACT_NATIVE:
+            return "React Native";
+        case OutputFormats.TAMAGUI:
+            return "Tamagui";
+        case OutputFormats.SCSS:
+            return "SCSS";
+        case OutputFormats.STYLE_DICTIONARY:
+            return "Style Dictionary";
+        case OutputFormats.SWIFT:
+            return "iOS Swift";
+        case OutputFormats.ANDROID:
+            return "Android";
+        case OutputFormats.FLUTTER:
+            return "Flutter";
         default:
             return format;
     }
@@ -60,7 +74,7 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
         setTailwindUnit,
         tailwindColorMode,
         setTailwindColorMode,
-        effectiveFormat,
+        fileExtension,
         exportedData,
         setExportedData,
         canExport,
@@ -124,6 +138,34 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                         <RadioGroup.Item value={OutputFormats.TAILWIND} />
                         Tailwind
                     </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.REACT_NATIVE} />
+                        React Native
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.TAMAGUI} />
+                        Tamagui
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.SCSS} />
+                        SCSS
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.STYLE_DICTIONARY} />
+                        Style Dictionary
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.SWIFT} />
+                        iOS Swift
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.ANDROID} />
+                        Android
+                    </RadioGroup.Label>
+                    <RadioGroup.Label>
+                        <RadioGroup.Item value={OutputFormats.FLUTTER} />
+                        Flutter
+                    </RadioGroup.Label>
                 </RadioGroup.Root>
             </SectionAccordion>
 
@@ -152,7 +194,7 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
                 canExport={canExport}
                 exportedData={exportedData}
                 filename={filename}
-                fileFormat={effectiveFormat}
+                fileFormat={fileExtension}
                 onDownload={handleDownload}
             />
         </>

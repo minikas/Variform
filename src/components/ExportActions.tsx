@@ -1,6 +1,5 @@
 import React from "react";
 import { Flex } from "figma-kit";
-import { OutputFormats } from "../types.d";
 import { ExportButton } from "./ExportButton";
 import { GitHubButton } from "./github/GitHubButton";
 
@@ -8,7 +7,8 @@ interface ExportActionsProps {
     canExport: boolean;
     exportedData: string;
     filename: string;
-    fileFormat: OutputFormats;
+    /** File extension used for the download and the GitHub path (no dot). */
+    fileFormat: string;
     onDownload: () => void;
 }
 

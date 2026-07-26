@@ -237,4 +237,21 @@ describe("exportToTailwindPreset (end-to-end with a Figma mock)", () => {
     expect(result).toContain('dim: "#00000080"');  // translucent → hex8
     expect(result).not.toContain("var(--color-");
   });
+
+  it("generates a valid JS module that evaluates to the preset object", async () => {
+    (globalThis as any).figma = makeFigmaMock();
+    const result = await exportToTailwindPreset();
+
+    // The Figma plugin runtime statically rejects anything resembling a
+    // dynamic import expression, even inside a string.
+    expect(result).not.toContain("import" + "(");
+
+    const mod = { exports: {} as any };
+    new Function("module", "exports", result)(mod, mod.exports);
+    expect(mod.exports.theme.extend.colors.blue["500"]).toBe(
+      "rgb(from var(--color-colors--blue--500, #0000ff) r g b / <alpha-value>)"
+    );
+    expect(mod.exports.theme.extend.spacing["4"]).toBe("16px");
+    expect(mod.exports.theme.extend.fontWeight.weight.bold).toBe(700);
+  });
 });

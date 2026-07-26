@@ -146,16 +146,167 @@ async function resolveAlias(
 }
 
 /**
- * Sets a value at a nested path inside the dictionary, creating intermediate
- * objects as needed.
+ * Sets a value at a nested path inside a dictionary, creating intermediate
+ * objects as needed. Shared by the dictionary-style serializers (Tailwind
+ * preset, React Native, Tamagui, Style Dictionary).
  */
-function setNested(root: PresetDictionary, path: string[], value: string | number): void {
+export function setNestedPath(root: Record<string, any>, path: string[], value: unknown): void {
     let current = root;
     for (let i = 0; i < path.length - 1; i++) {
         current[path[i]] = current[path[i]] || {};
         current = current[path[i]];
     }
     current[path[path.length - 1]] = value;
+}
+
+/**
+ * A variable flattened to a concrete, category-tagged token: the shared input
+ * for all dictionary-style serializers (Tailwind preset, React Native,
+ * Tamagui, SCSS, Style Dictionary, Swift, Android, Flutter).
+ */
+export interface FlatToken {
+    /** Category key (colors, spacing, fontSize, borderRadius, ...). */
+    category: string;
+    /** Token path segments below the category (kebab-case, prefix applied). */
+    path: string[];
+    /** Terminal variable name (after alias resolution). */
+    terminalName: string;
+    /** Terminal resolved type (after alias resolution). */
+    resolvedType: VariableResolvedDataType;
+    /** Concrete value (aliases resolved). */
+    value: VariableValue;
+}
+
+/**
+ * A full theme of concrete tokens for one mode name. Collections that do not
+ * have a mode with that name contribute their default (first selected) mode
+ * values, so every theme is complete.
+ */
+export interface ThemeTokens {
+    /** The mode name this theme represents (e.g. "Dark"). */
+    mode: string;
+    tokens: FlatToken[];
+}
+
+/**
+ * Flattens a collection's variables to concrete tokens for one effective mode,
+ * resolving aliases to the terminal token.
+ */
+async function flattenCollection(
+    collection: VariableCollection,
+    mode: { name: string; modeId: string },
+    prefix: string,
+    validTypes: Set<VariableResolvedDataType>
+): Promise<FlatToken[]> {
+    const tokens: FlatToken[] = [];
+
+    for (const variableId of collection.variableIds) {
+        const figVar = await figma.variables.getVariableByIdAsync(variableId);
+        if (!figVar || !validTypes.has(figVar.resolvedType)) continue;
+
+        const { name, resolvedType, valuesByMode } = figVar;
+        let value: VariableValue | undefined = valuesByMode[mode.modeId];
+        let valueType = resolvedType;
+        let terminalName = name;
+
+        if (value !== undefined && typeof value === 'object' && 'type' in value && value.type === 'VARIABLE_ALIAS') {
+            const resolved = await resolveAlias(value.id, mode.name, 0);
+            if (!resolved) continue;  // broken alias: skip the token
+            value = resolved.value;
+            valueType = resolved.resolvedType;
+            terminalName = resolved.name;
+        }
+        if (value === undefined) continue;
+
+        tokens.push({
+            category: tailwindPresetKey(name, resolvedType),
+            path: tokenPath(name, detectTailwindCategory(name, resolvedType), prefix),
+            terminalName,
+            resolvedType: valueType,
+            value,
+        });
+    }
+
+    return tokens;
+}
+
+/**
+ * Flattens all selected variable collections to concrete tokens with theme
+ * variants: the default theme uses the first selected mode of each collection
+ * (a static export's single value per token), and every other selected mode
+ * name (e.g. "Dark") becomes an extra complete theme — collections lacking
+ * that mode contribute their default values, and aliases resolve through
+ * mode-name matching.
+ * @param selection - Optional export selection (omit to export everything)
+ * @param prefix - Optional prefix prepended to each token family segment
+ * @returns Default tokens, the default mode labels, and extra theme variants
+ */
+export async function collectThemedTokens(
+    selection?: ExportSelection,
+    prefix: string = ""
+): Promise<{ defaultTokens: FlatToken[]; usedModes: string[]; extraThemes: ThemeTokens[] }> {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    const validTypes = new Set<VariableResolvedDataType>(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
+
+    interface EffectiveCollection {
+        collection: VariableCollection;
+        defaultMode: { name: string; modeId: string };
+        modes: { name: string; modeId: string }[];
+    }
+    const effective: EffectiveCollection[] = [];
+    const usedModes: string[] = [];
+    const extraModeNames: string[] = [];
+
+    for (const collection of collections) {
+        if (!isCollectionSelected(collection.id, selection)) continue;
+        const modes = selectedModes(collection.id, collection.modes, selection);
+        const [defaultMode] = modes;
+        if (!defaultMode) continue;
+        effective.push({ collection, defaultMode, modes });
+        usedModes.push(`${collection.name} → ${defaultMode.name}`);
+
+        // Mode names beyond each collection's default become theme variants.
+        for (const mode of modes.slice(1)) {
+            if (!extraModeNames.some((name) => name.toLowerCase() === mode.name.trim().toLowerCase())) {
+                extraModeNames.push(mode.name);
+            }
+        }
+    }
+
+    const defaultTokens: FlatToken[] = [];
+    for (const { collection, defaultMode } of effective) {
+        defaultTokens.push(...await flattenCollection(collection, defaultMode, prefix, validTypes));
+    }
+
+    const extraThemes: ThemeTokens[] = [];
+    for (const modeName of extraModeNames) {
+        const tokens: FlatToken[] = [];
+        for (const { collection, defaultMode, modes } of effective) {
+            // Collections without this mode fall back to their default values,
+            // so every theme variant is complete.
+            const match = modes.find((mode) => mode.name.trim().toLowerCase() === modeName.trim().toLowerCase());
+            tokens.push(...await flattenCollection(collection, match ?? defaultMode, prefix, validTypes));
+        }
+        extraThemes.push({ mode: modeName, tokens });
+    }
+
+    return { defaultTokens, usedModes, extraThemes };
+}
+
+/**
+ * Flattens all selected variable collections to concrete tokens: uses the
+ * first selected mode of each collection (static exports hold a single value
+ * per token) and resolves aliases to the terminal token.
+ * @param selection - Optional export selection (omit to export everything)
+ * @param prefix - Optional prefix prepended to each token family segment
+ * @returns The flat tokens plus the "Collection → Mode" labels used
+ */
+export async function collectTokens(
+    selection?: ExportSelection,
+    prefix: string = ""
+): Promise<{ tokens: FlatToken[]; usedModes: string[] }> {
+    const { defaultTokens, usedModes } = await collectThemedTokens(selection, prefix);
+    return { tokens: defaultTokens, usedModes };
 }
 
 /**
@@ -183,47 +334,15 @@ export const exportToTailwindPreset = async (
     unit: TailwindUnit = "px",
     colorMode: TailwindColorMode = "var-fallback"
 ): Promise<string> => {
-    const collections = await figma.variables.getLocalVariableCollectionsAsync();
     try {
+        const { tokens, usedModes } = await collectTokens(selection, prefix);
         const extend: PresetDictionary = {};
-        const usedModes: string[] = [];
-        const validTypes = new Set(["COLOR", "FLOAT", "BOOLEAN", "STRING"]);
 
-        for (const collection of collections) {
-            if (!isCollectionSelected(collection.id, selection)) continue;
-            // A static preset holds a single value per token: the first
-            // selected mode of each collection.
-            const [mode] = selectedModes(collection.id, collection.modes, selection);
-            if (!mode) continue;
-            usedModes.push(`${collection.name} → ${mode.name}`);
-
-            for (const variableId of collection.variableIds) {
-                const figVar = await figma.variables.getVariableByIdAsync(variableId);
-                if (!figVar || !validTypes.has(figVar.resolvedType)) continue;
-
-                const { name, resolvedType, valuesByMode } = figVar;
-                let value: VariableValue | undefined = valuesByMode[mode.modeId];
-                let valueType = resolvedType;
-                let terminalName = name;
-
-                if (value !== undefined && typeof value === 'object' && 'type' in value && value.type === 'VARIABLE_ALIAS') {
-                    // Standalone presets cannot reference other tokens, so
-                    // aliases are resolved to their concrete values.
-                    const resolved = await resolveAlias(value.id, mode.name, 0);
-                    if (!resolved) continue;  // broken alias: skip the token
-                    value = resolved.value;
-                    valueType = resolved.resolvedType;
-                    terminalName = resolved.name;
-                }
-                if (value === undefined) continue;
-
-                const presetKey = tailwindPresetKey(name, resolvedType);
-                const path = [presetKey, ...tokenPath(name, detectTailwindCategory(name, resolvedType), prefix)];
-                const formatted = valueType === "COLOR"
-                    ? colorValue(terminalName, value as RGBA, prefix, colorMode)
-                    : presetValue(valueType, value, presetKey, unit);
-                setNested(extend, path, formatted);
-            }
+        for (const token of tokens) {
+            const formatted = token.resolvedType === "COLOR"
+                ? colorValue(token.terminalName, token.value as RGBA, prefix, colorMode)
+                : presetValue(token.resolvedType, token.value, token.category, unit);
+            setNestedPath(extend, [token.category, ...token.path], formatted);
         }
 
         const header = [
@@ -242,9 +361,9 @@ export const exportToTailwindPreset = async (
             " */",
         ].join("\n");
 
-        // Note: no `@type {import(...)}` JSDoc here — the Figma plugin runtime
-        // statically rejects anything resembling an import expression, even
-        // inside a string, which would break the whole plugin bundle.
+        // Note: no `@type` JSDoc with a dynamic import expression here — the
+        // Figma plugin runtime statically rejects anything resembling one,
+        // even inside a string, which would break the whole plugin bundle.
         const config = `module.exports = ${serializeDictionary({ theme: { extend } })};\n`;
 
         return `${header}\n\n${config}`;

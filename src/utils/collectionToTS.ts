@@ -5,7 +5,8 @@ import type { ExportSelection, StyleSelection } from "../types.d";
 /**
  * Exports all local variable collections to TypeScript format. Shares the
  * JavaScript exporter's shape (one `export const` per collection, nested by
- * mode and `/`-delimited groups, aliases as direct references) and appends
+ * mode and `/`-delimited groups, cross-collection aliases as direct
+ * references, other aliases resolved to their concrete value) and appends
  * `as const` so consumers get literal types and autocomplete for free.
  * @param selection - Optional export selection (omit to export everything)
  * @param styleSelection - Which local style kinds to append (default all)

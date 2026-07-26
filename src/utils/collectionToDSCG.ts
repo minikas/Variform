@@ -143,8 +143,8 @@ export function formatDscgValue(
     case "FLOAT":
       return Number((value as number).toFixed(3));
     case "BOOLEAN":
-      // Boolean token values are emitted as the strings "true"/"false".
-      return JSON.stringify(value as boolean);
+      // A "boolean" $type must carry a real JSON boolean, not a string.
+      return value as boolean;
     case "STRING":
     default:
       return String(value);

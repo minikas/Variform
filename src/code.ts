@@ -8,6 +8,13 @@ import { exportToTailwind } from "./utils/collectionToTailwind";
 import { exportToTailwindPreset } from "./utils/collectionToTailwindPreset";
 import { exportToJS } from "./utils/collectionToJS";
 import { exportToTS } from "./utils/collectionToTS";
+import { exportToReactNative } from "./utils/collectionToReactNative";
+import { exportToTamagui } from "./utils/collectionToTamagui";
+import { exportToSCSS } from "./utils/collectionToSCSS";
+import { exportToStyleDictionary } from "./utils/collectionToStyleDictionary";
+import { exportToSwift } from "./utils/collectionToSwift";
+import { exportToAndroid } from "./utils/collectionToAndroid";
+import { exportToFlutter } from "./utils/collectionToFlutter";
 import { OutputFormats, MessageTypes, PluginCommands, PluginMessage, CollectionMeta, ExportSelection, StyleSelection, TailwindOutput, TailwindUnit, TailwindColorMode } from "./types.d";
 import { ALL_STYLES } from "./utils/styleSelection";
 import { rgbToCssColor } from "./utils/color";
@@ -94,6 +101,27 @@ async function handleExport(
                 data = tailwindOutput === "preset"
                     ? await exportToTailwindPreset(selection, tailwindPrefix, tailwindUnit, tailwindColorMode)
                     : await exportToTailwind(selection, styleSelection, tailwindPrefix, tailwindUnit);
+                break;
+            case OutputFormats.REACT_NATIVE:
+                data = await exportToReactNative(selection);
+                break;
+            case OutputFormats.TAMAGUI:
+                data = await exportToTamagui(selection);
+                break;
+            case OutputFormats.SCSS:
+                data = await exportToSCSS(selection);
+                break;
+            case OutputFormats.STYLE_DICTIONARY:
+                data = await exportToStyleDictionary(selection);
+                break;
+            case OutputFormats.SWIFT:
+                data = await exportToSwift(selection);
+                break;
+            case OutputFormats.ANDROID:
+                data = await exportToAndroid(selection);
+                break;
+            case OutputFormats.FLUTTER:
+                data = await exportToFlutter(selection);
                 break;
             default:
                 throw new Error(`Unsupported format: ${format}`);

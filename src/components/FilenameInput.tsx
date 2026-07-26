@@ -1,9 +1,9 @@
 import React from "react";
 import { Flex, Text, Input, Label } from "figma-kit";
-import { OutputFormats } from "../types.d";
 
 interface FilenameInputProps {
-    format: OutputFormats;
+    /** File extension shown in the input and used for validation (no dot). */
+    extension: string;
     filename: string;
     onFilenameChange: (filename: string) => void;
 }
@@ -12,7 +12,7 @@ interface FilenameInputProps {
  * Reusable filename input component with format-specific validation
  */
 export const FilenameInput: React.FC<FilenameInputProps> = ({ 
-    format, 
+    extension, 
     filename, 
     onFilenameChange 
 }) => {
@@ -22,7 +22,7 @@ export const FilenameInput: React.FC<FilenameInputProps> = ({
             value = `tokens`;
         }
         // Remove format extension if present
-        const cleanValue = value.replace(`.${format}`, '');
+        const cleanValue = value.replace(`.${extension}`, '');
         onFilenameChange(cleanValue);
     };
 
@@ -33,12 +33,12 @@ export const FilenameInput: React.FC<FilenameInputProps> = ({
             </Label>
             <Input
                 id="varvar-filename"
-                placeholder={`Ex.: export_variables.${format}`}
-                value={`${filename}.${format}`}
+                placeholder={`Ex.: export_variables.${extension}`}
+                value={`${filename}.${extension}`}
                 required
                 selectOnClick
-                pattern={`^[a-zA-Z0-9_-]+\\.(${format})$`}
-                title={`Enter a valid filename with .${format} extension`}
+                pattern={`^[a-zA-Z0-9_-]+\\.(${extension})$`}
+                title={`Enter a valid filename with .${extension} extension`}
                 onChange={handleFilenameChange}
             />
         </Flex>
