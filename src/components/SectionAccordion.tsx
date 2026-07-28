@@ -8,7 +8,7 @@ interface SectionAccordionProps {
   summary?: React.ReactNode;
   /** Whether the section starts expanded. Defaults to collapsed. */
   defaultOpen?: boolean;
-  /** Optional control rendered to the right of the header while expanded. */
+  /** Optional control pinned to the right of the header row. */
   action?: React.ReactNode;
   children: React.ReactNode;
 }
@@ -39,8 +39,9 @@ const rowStyle: React.CSSProperties = {
 
 /**
  * A collapsible section with a header row. When collapsed it shows a summary of
- * the current selection on the right (space-between); when expanded it can show
- * an action control there instead. Used to keep the export sidebar compact.
+ * the current selection on the right (space-between); an optional action stays
+ * pinned to the far right of the header in both states. Used to keep the
+ * export sidebar compact.
  */
 export const SectionAccordion: React.FC<SectionAccordionProps> = ({
   label,
@@ -62,7 +63,7 @@ export const SectionAccordion: React.FC<SectionAccordionProps> = ({
             ) : null}
           </span>
         </Collapsible.Trigger>
-        {open && action ? action : null}
+        {action ?? null}
       </Flex>
 
       <Collapsible.Content>

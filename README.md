@@ -19,7 +19,7 @@ The GitHub sync flow lives next to the download button in every export view:
 
 - **Multiple Export Formats**: Export Figma variables to JSON, CSV, CSS, JavaScript, TypeScript, or Tailwind (CSS v4 `@theme` stylesheet or v3 preset dictionary)
 - **Tailwind Options**: Token prefix, px/rem/em units, and four color modes (CSS-var reference with hex fallback, bare var, concrete rgb, or hex) — remembered per file
-- **Push to GitHub**: Connect a repository, preview a token-level diff, commit on a new branch, and open a pull request — without leaving Figma
+- **Push to GitHub**: Push multiple export formats at once — each to its own repo/path — with per-file diffs grouped by repository, one atomic commit per repo, and pull requests opened for you
 - **Refined UI**: Accordion-based selection, live preview with skeleton loading, inspect modals, and inline diff review before pushing
 - **Selective Export**: Pick exactly which collections and modes (themes) to export from a real-time accordion — everything is selected by default, and the preview updates as you toggle
 - **Styles Export**: Typography, paint (solid/gradient), effect (shadow/blur), and grid styles are exported alongside your variables in the same file (toggleable)
@@ -159,11 +159,11 @@ For format selection within the interface:
 
 Every export view includes **Connect GitHub…** / **Push to GitHub** next to the download button (enabled once output has been generated):
 
-1. **Connect** — enter a [GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new) with `contents` and `pull_requests` access (or classic `repo` scope). Pick a repository and base branch from searchable lists. GitHub Enterprise is not currently supported — the plugin can only reach `api.github.com`.
-2. **Remember (optional)** — store the connection in Figma client storage. The token is encrypted with a passphrase you choose (AES-256-GCM) and must be unlocked each session.
-3. **Configure the push** — set the repository file path (remembered per document), target branch (defaults to `variform/<filename>-<suffix>`), commit message, and pull request title/body.
-4. **Review the diff** — **Refresh** compares the new export against the file already on the target branch (or the base branch when the target branch does not exist yet). JSON/DSCG and CSS use token-level diffs; CSV and JavaScript fall back to line diffs.
-5. **Push** — creates the branch when needed, commits the file, and opens a pull request automatically. If PR creation fails (e.g. one already exists), a compare URL is provided as a fallback.
+1. **Connect** — enter a [GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new) with `contents` and `pull_requests` access (or classic `repo` scope). One token can serve several repositories. GitHub Enterprise is not currently supported — the plugin can only reach `api.github.com`.
+2. **Remember (optional)** — store the connection in Figma client storage. The token is encrypted with a passphrase you choose (AES-256-GCM) and must be unlocked each session. Only your identity is stored — repositories live in the per-document push targets.
+3. **Configure targets** — add one target per export format (e.g. Tailwind CSS + Flutter), each with its own format options, repository, branch (defaults to `variform/<suffix>`), base branch, and file path. Targets are remembered per document; branch names are re-seeded each session. Targets pointing at the same repository and branch are grouped automatically — a monorepo with per-format folders works the same as multiple repositories.
+4. **Review the changes** — the dialog previews one diff per target file, grouped by repository, comparing the new export against the file on the target branch (or the base branch when the target branch does not exist yet). JSON/DSCG and CSS use token-level diffs; other formats fall back to line diffs.
+5. **Push** — each repo+branch group lands as ONE atomic commit (Git Data API: blobs → tree → commit → ref update), creating the branch when needed and opening at most one pull request per group. Groups are pushed independently: a failure in one repository is reported next to the successful groups, and if PR creation fails (e.g. one already exists), a compare URL is provided as a fallback.
 
 > **Security:** Your token is sent only to the configured GitHub host over HTTPS. It is never logged or embedded in exported files.
 
@@ -294,6 +294,7 @@ src/
 │   ├── github/              # GitHub connect / push / diff UI
 │   │   ├── GitHubButton.tsx
 │   │   ├── GitHubDialog.tsx
+│   │   ├── TargetRow.tsx      # Per-format push target editor
 │   │   └── DiffList.tsx
 │   ├── PluginDialogShell.tsx  # Layout shell with padding and footer
 │   ├── ExportHeader.tsx
@@ -315,7 +316,8 @@ src/
 │   └── InspectContext.tsx
 ├── hooks/              # Custom React hooks
 │   ├── useExportData.ts    # Hook for managing export data and state
-│   ├── useGitHub.ts        # GitHub connect / push / diff orchestration
+│   ├── useGitHub.ts        # GitHub connect / push groups / diff orchestration
+│   ├── useTargetExports.ts # Multi-format export resolution for push targets
 │   └── useClientStorage.ts
 ├── views/              # Format-specific export views
 │   ├── ExportView.tsx      # Generic export with format selector
@@ -325,7 +327,8 @@ src/
 │   └── ExportJS.tsx
 ├── utils/              # Export processing utilities
 │   ├── github/                # GitHub REST client, diff, crypto, branch naming
-│   │   ├── githubApi.ts
+│   │   ├── githubApi.ts       # REST client incl. Git Data API (pushFiles)
+│   │   ├── pushTargets.ts     # Push target model, grouping, persistence/migration
 │   │   ├── tokenDiff.ts
 │   │   ├── crypto.ts
 │   │   └── branchName.ts

@@ -44,9 +44,6 @@ export const ExportCSV: React.FC<ExportCSVProps> = ({ editorType = "" }) => {
 
             <ExportActions
                 canExport={canExport}
-                exportedData={exportedData}
-                filename={filename}
-                fileFormat={format}
                 onDownload={handleDownload}
             />
         </>

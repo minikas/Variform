@@ -1,8 +1,10 @@
 /**
  * Minimal GitHub REST client used by the "Push to GitHub" feature.
  *
- * Variform exports a single file per format, so we deliberately avoid the heavy
- * Octokit dependency and talk to the GitHub REST API directly with `fetch`.
+ * Variform exports a single file per format (exporters stay single-output), so
+ * we deliberately avoid the heavy Octokit dependency and talk to the GitHub
+ * REST API directly with `fetch`. Multi-format pushes bundle several exported
+ * files into one atomic commit via the Git Data API (see {@link pushFiles}).
  * All requests run inside the plugin UI iframe, which has full browser APIs and
  * is granted network access to api.github.com via the plugin manifest.
  *
@@ -120,17 +122,18 @@ async function githubRequest<T>(
 }
 
 /**
- * Encode a UTF-8 string to base64 (required by the GitHub Contents API).
- * `btoa` only handles Latin-1, so we go through TextEncoder first.
+ * Verify the token is valid and return the authenticated user's login.
+ * Used when connecting (the connection stores identity only — decision D3).
+ * Throws a {@link GitHubApiError} when the token is invalid (401).
  */
-export function utf8ToBase64(input: string): string {
-  const bytes = new TextEncoder().encode(input);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+export async function getAuthenticatedUser(
+  auth: GitHubAuth,
+): Promise<{ login: string }> {
+  const data = await githubRequest<{ login: string }>(auth, "/user");
+  if (!data) {
+    throw new GitHubApiError(500, "GitHub returned an empty user response.");
   }
-  return btoa(binary);
+  return { login: data.login };
 }
 
 /**
@@ -257,26 +260,6 @@ export async function createBranch(
 }
 
 /**
- * Return the blob SHA of an existing file on a branch, or `null` if the file
- * does not exist (or the path resolves to a directory).
- */
-export async function getFileSha(
-  conn: GitHubConnection,
-  path: string,
-  branch: string,
-): Promise<string | null> {
-  const data = await githubRequest<{ sha: string } | unknown[]>(
-    conn,
-    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/contents/${encodePath(path)}?ref=${seg(branch)}`,
-    { allow404: true },
-  );
-  if (!data || Array.isArray(data)) {
-    return null;
-  }
-  return (data as { sha: string }).sha;
-}
-
-/**
  * Fetch the raw text of a file on a branch, or `null` when it does not exist
  * (or the path resolves to a directory — see below).
  * Uses the raw media type so the body comes back as the file contents directly
@@ -305,8 +288,7 @@ export async function getFileContent(
   }
   // The raw media type only applies to files: for a DIRECTORY path GitHub
   // ignores it and answers 200 with the JSON listing. Treat that like a
-  // missing file instead of diffing against directory JSON (getFileSha does
-  // the equivalent via its array check).
+  // missing file instead of diffing against directory JSON.
   const contentType = response.headers.get("Content-Type") ?? "";
   if (contentType.includes("application/json")) {
     return null;
@@ -314,46 +296,157 @@ export async function getFileContent(
   return await response.text();
 }
 
-export interface CommitFileParams {
-  path: string;
-  content: string;
-  message: string;
-  branch: string;
-  /** Blob SHA of the file being replaced. Omit when creating a new file. */
-  sha?: string;
-}
-
-export interface CommitResult {
-  commitSha: string;
-  contentHtmlUrl: string | null;
-}
-
-/** Create or update a single file on a branch. */
-export async function commitFile(
+/**
+ * Create a Git blob with UTF-8 content and return its SHA.
+ * (`utf-8` encoding avoids the base64 round-trip the Contents API requires.)
+ */
+export async function createBlob(
   conn: GitHubConnection,
-  params: CommitFileParams,
-): Promise<CommitResult> {
-  const data = await githubRequest<{
-    commit: { sha: string };
-    content: { html_url: string } | null;
-  }>(conn, `/repos/${seg(conn.owner)}/${seg(conn.repo)}/contents/${encodePath(params.path)}`, {
-    method: "PUT",
-    body: {
-      message: params.message,
-      content: utf8ToBase64(params.content),
-      branch: params.branch,
-      ...(params.sha ? { sha: params.sha } : {}),
+  content: string,
+): Promise<string> {
+  const data = await githubRequest<{ sha: string }>(
+    conn,
+    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/git/blobs`,
+    {
+      method: "POST",
+      body: { content, encoding: "utf-8" },
     },
-  });
+  );
+  if (!data) {
+    throw new GitHubApiError(500, "GitHub returned an empty blob response.");
+  }
+  return data.sha;
+}
 
+/** Return the tree SHA of a commit (used as `base_tree` for new trees). */
+export async function getCommitTreeSha(
+  conn: GitHubConnection,
+  commitSha: string,
+): Promise<string> {
+  const data = await githubRequest<{ tree: { sha: string } }>(
+    conn,
+    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/git/commits/${seg(commitSha)}`,
+  );
   if (!data) {
     throw new GitHubApiError(500, "GitHub returned an empty commit response.");
   }
+  return data.tree.sha;
+}
 
-  return {
-    commitSha: data.commit.sha,
-    contentHtmlUrl: data.content?.html_url ?? null,
-  };
+/** A file entry in a new tree: repository-relative path + blob SHA. */
+export interface TreeEntry {
+  path: string;
+  sha: string;
+}
+
+/**
+ * Create a tree on top of `baseTree` containing the given file entries.
+ * Files absent from `entries` keep their `baseTree` content.
+ */
+export async function createTree(
+  conn: GitHubConnection,
+  params: { baseTree: string; entries: TreeEntry[] },
+): Promise<string> {
+  const data = await githubRequest<{ sha: string }>(
+    conn,
+    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/git/trees`,
+    {
+      method: "POST",
+      body: {
+        base_tree: params.baseTree,
+        tree: params.entries.map((entry) => ({
+          path: entry.path,
+          mode: "100644",
+          type: "blob",
+          sha: entry.sha,
+        })),
+      },
+    },
+  );
+  if (!data) {
+    throw new GitHubApiError(500, "GitHub returned an empty tree response.");
+  }
+  return data.sha;
+}
+
+export interface CreatedCommit {
+  sha: string;
+  htmlUrl: string | null;
+}
+
+/** Create a commit with the given tree and parent(s). */
+export async function createCommit(
+  conn: GitHubConnection,
+  params: { message: string; tree: string; parents: string[] },
+): Promise<CreatedCommit> {
+  const data = await githubRequest<{ sha: string; html_url?: string }>(
+    conn,
+    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/git/commits`,
+    {
+      method: "POST",
+      body: { message: params.message, tree: params.tree, parents: params.parents },
+    },
+  );
+  if (!data) {
+    throw new GitHubApiError(500, "GitHub returned an empty commit response.");
+  }
+  return { sha: data.sha, htmlUrl: data.html_url ?? null };
+}
+
+/**
+ * Move a branch ref to `sha` (non-forced: the update is rejected with a 422
+ * when the branch HEAD is not the parent of `sha` — callers may rebuild the
+ * commit on the fresh HEAD and retry once).
+ */
+export async function updateRef(
+  conn: GitHubConnection,
+  branch: string,
+  sha: string,
+): Promise<void> {
+  await githubRequest(
+    conn,
+    `/repos/${seg(conn.owner)}/${seg(conn.repo)}/git/refs/heads/${encodePath(branch)}`,
+    {
+      method: "PATCH",
+      body: { sha, force: false },
+    },
+  );
+}
+
+/** Run `fn` over `items` with at most `limit` promises in flight, order-preserving. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+/** Max concurrent blob creations (friendly to secondary rate limits). */
+const BLOB_CONCURRENCY = 3;
+
+export interface PushFilesParams {
+  /** Target branch. When equal to the base branch, no PR is created. */
+  branch: string;
+  /** Base branch for branch creation and PRs. Defaults to the connection's. */
+  baseBranch?: string;
+  message: string;
+  files: Array<{ path: string; content: string }>;
+  createPr?: boolean;
+  prTitle?: string;
+  prBody?: string;
 }
 
 export interface CreatePullRequestParams {
@@ -407,18 +500,6 @@ export function buildCompareUrl(conn: GitHubConnection, branch: string): string 
   return `${webBase}/${conn.owner}/${conn.repo}/compare/${conn.baseBranch}...${branch}?expand=1`;
 }
 
-export interface PushParams {
-  /** Repository-relative file path, e.g. "tokens/variables.json". */
-  path: string;
-  content: string;
-  commitMessage: string;
-  /** Target branch. When equal to the base branch, no PR is created. */
-  branch: string;
-  createPr: boolean;
-  prTitle?: string;
-  prBody?: string;
-}
-
 export interface PushResult {
   branch: string;
   commitSha: string;
@@ -430,63 +511,107 @@ export interface PushResult {
 }
 
 /**
- * Commit a file to GitHub and, when requested, open a pull request.
+ * Commit several files to GitHub as ONE atomic commit (Git Data API:
+ * blobs → tree on the branch HEAD tree → commit → ref update) and, when
+ * requested, open a single pull request for the whole set.
  *
  * The target branch is created from the base branch when it does not exist.
- * If automatic PR creation fails (e.g. one already exists or there is no diff),
+ * If the ref update races (branch moved between diff and push), the tree and
+ * commit are rebuilt once on the fresh HEAD. If automatic PR creation fails,
  * the returned {@link PushResult.compareUrl} still lets the user open one.
  */
-export async function pushFile(
+export async function pushFiles(
   conn: GitHubConnection,
-  params: PushParams,
+  params: PushFilesParams,
 ): Promise<PushResult> {
-  const targetIsBase = params.branch === conn.baseBranch;
+  if (params.files.length === 0) {
+    throw new GitHubApiError(400, "pushFiles requires at least one file.");
+  }
 
-  if (!targetIsBase) {
-    const existing = await getBranchSha(conn, params.branch);
-    if (!existing) {
-      const baseSha = await getBranchSha(conn, conn.baseBranch);
-      if (!baseSha) {
-        throw new GitHubApiError(
-          404,
-          `Base branch "${conn.baseBranch}" was not found in ${conn.owner}/${conn.repo}.`,
-        );
+  const baseBranch = params.baseBranch ?? conn.baseBranch;
+  // Scope the connection to the group's base branch so buildCompareUrl and
+  // createPullRequest target the right base even when it differs from the
+  // connection default.
+  const repo: GitHubConnection = { ...conn, baseBranch };
+  const targetIsBase = params.branch === baseBranch;
+
+  // Resolve the branch HEAD, creating the branch from the base when missing.
+  let headSha = await getBranchSha(repo, params.branch);
+  if (!headSha) {
+    const baseSha = await getBranchSha(repo, baseBranch);
+    if (!baseSha) {
+      throw new GitHubApiError(
+        404,
+        `Base branch "${baseBranch}" was not found in ${repo.owner}/${repo.repo}.`,
+      );
+    }
+    try {
+      await createBranch(repo, params.branch, baseSha);
+      headSha = baseSha;
+    } catch (error) {
+      // Race: another process created the branch between our existence check
+      // and the create call. A 422 is only safe to ignore if the branch
+      // really exists now — otherwise rethrow (e.g. an invalid base SHA).
+      if (!(error instanceof GitHubApiError) || error.status !== 422) {
+        throw error;
       }
-      try {
-        await createBranch(conn, params.branch, baseSha);
-      } catch (error) {
-        // Race: another process created the branch between our existence check
-        // and the create call. A 422 is only safe to ignore if the branch
-        // really exists now — otherwise rethrow (e.g. an invalid base SHA).
-        if (!(error instanceof GitHubApiError) || error.status !== 422) {
-          throw error;
-        }
-        const raced = await getBranchSha(conn, params.branch);
-        if (!raced) {
-          throw error;
-        }
+      const raced = await getBranchSha(repo, params.branch);
+      if (!raced) {
+        throw error;
       }
+      headSha = raced;
     }
   }
 
-  const existingFileSha = await getFileSha(conn, params.path, params.branch);
-  const commit = await commitFile(conn, {
-    path: params.path,
-    content: params.content,
-    message: params.commitMessage,
-    branch: params.branch,
-    sha: existingFileSha ?? undefined,
-  });
+  // One blob per file (small concurrency to stay friendly to rate limits).
+  // Blobs are content-addressed, so a ref-race rebuild can reuse these SHAs.
+  const blobShas = await mapWithConcurrency(params.files, BLOB_CONCURRENCY, (file) =>
+    createBlob(repo, file.content),
+  );
 
-  const compareUrl = buildCompareUrl(conn, params.branch);
+  // Build a tree + commit on top of the given parent commit.
+  const buildCommit = async (parentSha: string): Promise<CreatedCommit> => {
+    const baseTree = await getCommitTreeSha(repo, parentSha);
+    const tree = await createTree(repo, {
+      baseTree,
+      entries: params.files.map((file, index) => ({
+        path: file.path,
+        sha: blobShas[index],
+      })),
+    });
+    return createCommit(repo, {
+      message: params.message,
+      tree,
+      parents: [parentSha],
+    });
+  };
+
+  let commit = await buildCommit(headSha);
+  try {
+    await updateRef(repo, params.branch, commit.sha);
+  } catch (error) {
+    // Ref race: the branch HEAD moved while we were pushing. Re-fetch the
+    // HEAD, rebuild the tree/commit on top of it, and retry exactly once.
+    if (!(error instanceof GitHubApiError) || error.status !== 422) {
+      throw error;
+    }
+    const freshHead = await getBranchSha(repo, params.branch);
+    if (!freshHead) {
+      throw error;
+    }
+    commit = await buildCommit(freshHead);
+    await updateRef(repo, params.branch, commit.sha);
+  }
+
+  const compareUrl = buildCompareUrl(repo, params.branch);
 
   let prUrl: string | null = null;
   if (params.createPr && !targetIsBase) {
     try {
-      const pr = await createPullRequest(conn, {
-        title: params.prTitle || params.commitMessage,
+      const pr = await createPullRequest(repo, {
+        title: params.prTitle || params.message,
         head: params.branch,
-        base: conn.baseBranch,
+        base: baseBranch,
         body: params.prBody,
       });
       prUrl = pr.url;
@@ -498,8 +623,8 @@ export async function pushFile(
 
   return {
     branch: params.branch,
-    commitSha: commit.commitSha,
-    commitUrl: commit.contentHtmlUrl,
+    commitSha: commit.sha,
+    commitUrl: commit.htmlUrl,
     prUrl,
     compareUrl,
   };

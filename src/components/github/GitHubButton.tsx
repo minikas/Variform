@@ -4,24 +4,17 @@ import { useGitHub } from "../../hooks/useGitHub";
 import { GitHubDialog } from "./GitHubDialog";
 
 interface GitHubButtonProps {
-  /** The exported file contents to commit. */
-  data: string;
-  /** Filename (without extension) used to seed the path and branch. */
-  filename: string;
-  /** File extension, e.g. "json" / "css". */
-  fileFormat: string;
+  /** Disabled until an export has been produced. */
+  disabled?: boolean;
 }
 
 /**
  * Secondary action next to the download button: opens the GitHub dialog so the
- * user can commit the exported file and open a pull request. Disabled until an
- * export has been produced.
+ * user can push the configured export formats and open pull requests. The
+ * dialog owns the export requests — this button only gates on "something to
+ * export".
  */
-export const GitHubButton: React.FC<GitHubButtonProps> = ({
-  data,
-  filename,
-  fileFormat,
-}) => {
+export const GitHubButton: React.FC<GitHubButtonProps> = ({ disabled }) => {
   const [open, setOpen] = useState(false);
   const github = useGitHub();
 
@@ -31,19 +24,12 @@ export const GitHubButton: React.FC<GitHubButtonProps> = ({
         variant="primary"
         fullWidth={true}
         size="medium"
-        disabled={!data}
+        disabled={disabled}
         onClick={() => setOpen(true)}
       >
         {github.isConnected ? "Push to GitHub" : "Connect GitHub…"}
       </Button>
-      <GitHubDialog
-        open={open}
-        onOpenChange={setOpen}
-        github={github}
-        data={data}
-        filename={filename}
-        fileFormat={fileFormat}
-      />
+      <GitHubDialog open={open} onOpenChange={setOpen} github={github} />
     </>
   );
 };

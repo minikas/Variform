@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { encryptSecret, decryptSecret } from "./crypto";
 
-describe("crypto", () => {
+// PBKDF2 (200k iterations) is slow by design; under a fully-parallel suite the
+// default 5s test timeout is not always enough.
+describe("crypto", { timeout: 30000 }, () => {
   it("round-trips a secret with the correct passphrase", async () => {
     const secret = await encryptSecret("ghp_secret_token", "correct horse battery staple");
     // Ciphertext must not leak the plaintext.

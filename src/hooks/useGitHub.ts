@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import {
+  GitHubAuth,
   GitHubConnection,
   PushResult,
+  getAuthenticatedUser,
   getFileContent,
-  pushFile,
-  verifyConnection,
+  pushFiles,
 } from "../utils/github/githubApi";
 import { DiffResult, computeDiff } from "../utils/github/tokenDiff";
 import { EncryptedSecret, decryptSecret, encryptSecret } from "../utils/github/crypto";
@@ -19,23 +20,37 @@ export type GitHubStatus = "idle" | "verifying" | "pushing" | "success" | "error
 export type DiffStatus = "idle" | "loading" | "error";
 
 /**
- * Connection metadata persisted in clientStorage. The plaintext token is NEVER
- * persisted — only the AES-GCM-encrypted blob (when the user opts to remember).
+ * Connection metadata persisted in clientStorage (decision D3): identity only.
+ * The plaintext token is NEVER persisted — only the AES-GCM-encrypted blob
+ * (when the user opts to remember). Repository/branch/path live in
+ * per-document push targets, not here.
  */
 export interface StoredConnection {
-  owner: string;
-  repo: string;
-  baseBranch: string;
   baseUrl?: string;
   /** Present when the token was persisted (encrypted with a passphrase). */
   encrypted?: EncryptedSecret;
+  /** Cached GitHub login for display purposes. */
+  login?: string;
 }
 
-export interface ConnectArgs {
-  token: string;
+/**
+ * Repository scope recovered from a legacy single-repo connection. Used once
+ * to seed the initial push target; never persisted as part of the connection.
+ */
+export interface RepoScope {
   owner: string;
   repo: string;
   baseBranch: string;
+}
+
+/**
+ * Connection metadata as exposed to the UI: the stored identity plus the
+ * legacy repository scope when one was migrated (display/seeding only).
+ */
+export type ConnectionMeta = StoredConnection & Partial<RepoScope>;
+
+export interface ConnectArgs {
+  token: string;
   baseUrl?: string;
   /** Persist the encrypted token across plugin sessions. */
   persist: boolean;
@@ -43,57 +58,97 @@ export interface ConnectArgs {
   passphrase?: string;
 }
 
-export interface PushArgs {
-  path: string;
-  content: string;
-  commitMessage: string;
-  branch: string;
-  createPr: boolean;
-  prTitle?: string;
-  prBody?: string;
-}
-
+/** One file to diff: a target's repo coordinates plus the fresh export. */
 export interface PreviewDiffArgs {
-  path: string;
+  /** Push target id — keys the per-target diff state and query cache. */
+  targetId: string;
+  owner: string;
+  repo: string;
+  baseBranch: string;
   branch: string;
-  /** The freshly generated export contents. */
-  content: string;
+  path: string;
   /** File extension that selects the diff parser (e.g. "json" / "css"). */
   extension: string;
+  /** The freshly generated export contents. */
+  content: string;
+}
+
+export interface TargetDiffState {
+  diff: DiffResult | null;
+  status: DiffStatus;
+  error: string | null;
+}
+
+/** One repo+branch group to push as a single atomic commit (decision D1/D2). */
+export interface PushGroupInput {
+  /** Grouping key `${owner}/${repo}#${branch}` (see utils/github/pushTargets). */
+  key: string;
+  owner: string;
+  repo: string;
+  baseBranch: string;
+  branch: string;
+  message: string;
+  createPr: boolean;
+  /** Ids of the targets in the group — used to invalidate their diff queries. */
+  targetIds: string[];
+  files: Array<{ path: string; content: string }>;
+}
+
+/** Outcome of one group's push (partial success is reported per group). */
+export interface PushGroupResult {
+  key: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  result?: PushResult;
+  error?: string;
+}
+
+/** Progress of a multi-group push, for the dialog footer. */
+export interface PushProgress {
+  done: number;
+  total: number;
 }
 
 export interface UseGitHubReturn {
-  /** Connection metadata (owner/repo/branch), without the token. */
-  meta: StoredConnection | null;
+  /** Connection metadata (identity-only), without the token. */
+  meta: ConnectionMeta | null;
+  /** Legacy repo scope recovered from storage — seed for the first target. */
+  repoScope: RepoScope | null;
   /** True when a connection exists (whether locked or unlocked). */
   isConnected: boolean;
   /** True when the connection is persisted+encrypted and not yet unlocked. */
   isLocked: boolean;
-  /** Full connection incl. token — only available once unlocked this session. */
-  connection: GitHubConnection | null;
+  /** Token + baseUrl for this session — only available once unlocked. */
+  auth: GitHubAuth | null;
   /** True once clientStorage has been read. */
   isLoaded: boolean;
   status: GitHubStatus;
   error: string | null;
-  result: PushResult | null;
-  /** Verify, then keep (and optionally encrypt+persist) a connection. */
+  /** Verify the token, then keep (and optionally encrypt+persist) identity. */
   connect: (args: ConnectArgs) => Promise<boolean>;
   /** Decrypt the persisted token with the passphrase for this session. */
   unlock: (passphrase: string) => Promise<boolean>;
   /** Forget the saved connection and clear the in-memory token. */
   disconnect: () => void;
-  /** Commit a file and optionally open a PR. Resolves to true on success. */
-  push: (args: PushArgs) => Promise<boolean>;
-  /** Clear transient status/error/result/diff (e.g. when reopening the dialog). */
+  /**
+   * Push all groups sequentially (one atomic commit each). Resolves to true
+   * when the run completed — per-group outcomes are in {@link groupResults}
+   * (partial success does not throw).
+   */
+  pushGroups: (groups: PushGroupInput[]) => Promise<boolean>;
+  /** Per-group outcomes of the last push run, in group order. */
+  groupResults: PushGroupResult[] | null;
+  /** Live progress while a push run is in flight. */
+  pushProgress: PushProgress | null;
+  /** Clear transient status/error/results/diffs (e.g. when reopening). */
   reset: () => void;
-  /** Diff of the current repo file against the new export, once previewed. */
-  diff: DiffResult | null;
-  diffStatus: DiffStatus;
-  diffError: string | null;
-  /** Fetch the existing file and compute a diff against the new export. */
-  previewDiff: (args: PreviewDiffArgs) => void;
-  /** Discard a previously computed diff. */
-  clearDiff: () => void;
+  /** Per-target diff state, keyed by target id. */
+  diffs: Record<string, TargetDiffState>;
+  /** Fetch repo files and compute per-target diffs against the new exports. */
+  previewDiffs: (args: PreviewDiffArgs[]) => void;
+  /** Discard all previously computed diffs. */
+  clearDiffs: () => void;
 }
 
 function messageOf(error: unknown): string {
@@ -104,7 +159,13 @@ function messageOf(error: unknown): string {
 }
 
 export interface ParsedStored {
+  /** Identity-only connection metadata (decision D3). */
   meta: StoredConnection;
+  /**
+   * Repo fields recovered from a legacy single-repo record. They seed the
+   * initial push target instead of being persisted back into the connection.
+   */
+  repo?: RepoScope;
   /** Set only for legacy plaintext connections saved before encryption. */
   plaintextToken?: string;
 }
@@ -131,24 +192,37 @@ export function parseStored(value: string | null | undefined): ParsedStored | nu
   }
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
-    if (typeof parsed.owner === "string" && typeof parsed.repo === "string") {
-      const meta: StoredConnection = {
-        owner: parsed.owner,
-        repo: parsed.repo,
+    const encrypted = parseEncrypted(parsed.encrypted);
+    const hasLegacyRepo =
+      typeof parsed.owner === "string" && typeof parsed.repo === "string";
+    // A record is a connection when it carries the legacy repo fields or the
+    // identity-only shape (an encrypted token blob). Anything else is ignored.
+    if (!hasLegacyRepo && !encrypted) {
+      return null;
+    }
+    const meta: StoredConnection = {};
+    if (typeof parsed.baseUrl === "string") {
+      meta.baseUrl = parsed.baseUrl;
+    }
+    if (typeof parsed.login === "string") {
+      meta.login = parsed.login;
+    }
+    if (encrypted) {
+      meta.encrypted = encrypted;
+    }
+    const result: ParsedStored = { meta };
+    if (hasLegacyRepo) {
+      result.repo = {
+        owner: parsed.owner as string,
+        repo: parsed.repo as string,
         baseBranch: typeof parsed.baseBranch === "string" ? parsed.baseBranch : "main",
       };
-      if (typeof parsed.baseUrl === "string") {
-        meta.baseUrl = parsed.baseUrl;
-      }
-      const encrypted = parseEncrypted(parsed.encrypted);
-      if (encrypted) {
-        meta.encrypted = encrypted;
-      }
-      return {
-        meta,
-        plaintextToken: typeof parsed.token === "string" ? parsed.token : undefined,
-      };
     }
+    const plaintextToken = typeof parsed.token === "string" ? parsed.token : undefined;
+    if (plaintextToken) {
+      result.plaintextToken = plaintextToken;
+    }
+    return result;
   } catch {
     // Corrupt value — treat as not connected.
   }
@@ -162,6 +236,11 @@ export function parseStored(value: string | null | undefined): ParsedStored | nu
  * working. Returns `null` when there is nothing to migrate. On the next
  * session there is no plaintext to adopt, so the user reconnects (or unlocks,
  * if an encrypted record exists).
+ *
+ * The rewrite persists the identity-only {@link StoredConnection} (decision
+ * D3): legacy repo fields are dropped from storage here — they live on in the
+ * session via {@link ParsedStored.repo} and, afterwards, in per-document
+ * push targets.
  */
 export function migrateLegacyPlaintext(
   parsed: ParsedStored | null,
@@ -175,28 +254,73 @@ export function migrateLegacyPlaintext(
 }
 
 /**
+ * Push the groups SEQUENTIALLY (one atomic commit per repo+branch group),
+ * capturing per-group outcomes so one failing repo does not abort the others
+ * (partial success is reported explicitly). The push function is injected so
+ * tests can mock the GitHub client.
+ */
+export async function runPushGroups(
+  groups: PushGroupInput[],
+  push: (group: PushGroupInput) => Promise<PushResult>,
+  onGroupDone?: (done: number, total: number) => void,
+): Promise<PushGroupResult[]> {
+  const results: PushGroupResult[] = [];
+  for (const group of groups) {
+    const base = {
+      key: group.key,
+      owner: group.owner,
+      repo: group.repo,
+      branch: group.branch,
+    };
+    try {
+      const result = await push(group);
+      results.push({ ...base, result });
+    } catch (error) {
+      results.push({ ...base, error: messageOf(error) });
+    }
+    onGroupDone?.(results.length, groups.length);
+  }
+  return results;
+}
+
+/**
  * Orchestrates the "Push to GitHub" flow with TanStack Query: connect/unlock/
- * push are mutations, the diff is a query. The token lives in memory for the
- * session; if remembered, it's encrypted with a passphrase (AES-256-GCM) and
- * persisted, then decrypted via {@link unlock} on reopen.
+ * push are mutations, the per-target diffs are queries. The token lives in
+ * memory for the session; if remembered, it's encrypted with a passphrase
+ * (AES-256-GCM) and persisted, then decrypted via {@link unlock} on reopen.
+ * The stored connection is identity-only (D3) — repositories live in the
+ * per-document push targets.
  */
 export function useGitHub(): UseGitHubReturn {
   const { value, loaded, save } = useClientStorage(GITHUB_CONNECTION_KEY);
   const queryClient = useQueryClient();
 
-  // In-memory connection for this session (not persisted unless the user opts in).
-  const [sessionMeta, setSessionMeta] = useState<StoredConnection | null>(null);
+  // In-memory identity for this session (not persisted unless the user opts in).
+  const [sessionIdentity, setSessionIdentity] = useState<StoredConnection | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
 
   const parsed = useMemo(() => parseStored(value), [value]);
   const storedMeta = parsed?.meta ?? null;
-  const meta = sessionMeta ?? storedMeta;
+  const identity = sessionIdentity ?? storedMeta;
+  // Legacy repo fields of a stored record surface once, to seed the initial
+  // push target — they are never written back into the connection.
+  const repoScope = parsed?.repo ?? null;
+  const meta = useMemo<ConnectionMeta | null>(
+    () => (identity || repoScope ? { ...identity, ...repoScope } : null),
+    [identity, repoScope],
+  );
   // Legacy plaintext tokens (pre-encryption) are adopted for the session.
   const effectiveToken = sessionToken ?? parsed?.plaintextToken ?? null;
 
-  const connection = useMemo<GitHubConnection | null>(
-    () => (meta && effectiveToken ? { ...meta, token: effectiveToken } : null),
-    [meta, effectiveToken],
+  const auth = useMemo<GitHubAuth | null>(
+    () =>
+      effectiveToken
+        ? {
+            token: effectiveToken,
+            ...(identity?.baseUrl ? { baseUrl: identity.baseUrl } : {}),
+          }
+        : null,
+    [effectiveToken, identity],
   );
 
   const isConnected = meta != null;
@@ -220,18 +344,12 @@ export function useGitHub(): UseGitHubReturn {
 
   const connectMutation = useMutation({
     mutationFn: async (args: ConnectArgs) => {
-      const candidate: GitHubConnection = {
+      const user = await getAuthenticatedUser({
         token: args.token,
-        owner: args.owner,
-        repo: args.repo,
-        baseBranch: args.baseBranch,
         ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
-      };
-      const info = await verifyConnection(candidate);
-      const nextMeta: StoredConnection = {
-        owner: args.owner,
-        repo: args.repo,
-        baseBranch: args.baseBranch || info.defaultBranch,
+      });
+      const nextIdentity: StoredConnection = {
+        login: user.login,
         ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
       };
       if (args.persist) {
@@ -239,15 +357,17 @@ export function useGitHub(): UseGitHubReturn {
           throw new Error("Enter a passphrase to encrypt the saved token.");
         }
         const encrypted = await encryptSecret(args.token, args.passphrase);
-        save(JSON.stringify({ ...nextMeta, encrypted }));
+        // Identity-only record (D3): repos/branches/paths live in the
+        // per-document push targets, never in the connection.
+        save(JSON.stringify({ ...nextIdentity, encrypted }));
       } else {
         // Not remembering — make sure no previous (encrypted) copy lingers.
         save(null);
       }
-      return { nextMeta, token: args.token };
+      return { nextIdentity, token: args.token };
     },
-    onSuccess: ({ nextMeta, token }) => {
-      setSessionMeta(nextMeta);
+    onSuccess: ({ nextIdentity, token }) => {
+      setSessionIdentity(nextIdentity);
       setSessionToken(token);
     },
   });
@@ -261,60 +381,116 @@ export function useGitHub(): UseGitHubReturn {
     },
     onSuccess: (token) => {
       if (storedMeta) {
-        setSessionMeta(storedMeta);
+        setSessionIdentity(storedMeta);
       }
       setSessionToken(token);
     },
   });
 
+  const [pushProgress, setPushProgress] = useState<PushProgress | null>(null);
+
   const pushMutation = useMutation({
-    mutationFn: (args: PushArgs) => {
-      if (!connection) {
-        throw new Error("Connect a GitHub repository first.");
+    mutationFn: (groups: PushGroupInput[]) => {
+      if (!auth) {
+        throw new Error("Connect to GitHub first.");
       }
-      return pushFile(connection, args);
+      const sessionAuth = auth;
+      setPushProgress({ done: 0, total: groups.length });
+      return runPushGroups(
+        groups,
+        (group) => {
+          const conn: GitHubConnection = {
+            ...sessionAuth,
+            owner: group.owner,
+            repo: group.repo,
+            baseBranch: group.baseBranch,
+          };
+          return pushFiles(conn, {
+            branch: group.branch,
+            baseBranch: group.baseBranch,
+            message: group.message,
+            files: group.files,
+            createPr: group.createPr,
+            prTitle: group.message,
+          });
+        },
+        (done, total) => setPushProgress({ done, total }),
+      );
     },
-    onSuccess: () => {
-      // The push created/updated the branch and the file, so any cached diff and
-      // branch list are now stale — invalidate them to refetch fresh state (the
-      // diff against the pushed branch will then read as "no changes").
-      queryClient.invalidateQueries({ queryKey: ["github", "diff"] });
-      queryClient.invalidateQueries({ queryKey: ["github", "branches"] });
+    onSuccess: (results, groups) => {
+      // Each successful group created/updated its branch and files, so the
+      // cached diffs of ITS targets (and its branch list) are now stale —
+      // the re-fetched diff against the pushed branch reads "no changes".
+      for (const group of groups) {
+        const succeeded = results.some((r) => r.key === group.key && r.result);
+        if (!succeeded) {
+          continue;
+        }
+        queryClient.invalidateQueries({
+          predicate: (query) =>
+            query.queryKey[0] === "github" &&
+            query.queryKey[1] === "diff" &&
+            group.targetIds.includes(query.queryKey[2] as string),
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["github", "branches", group.owner, group.repo],
+        });
+      }
     },
   });
 
-  // --- Query: diff preview ---------------------------------------------------
+  // --- Queries: per-target diff previews (decision D5) -----------------------
 
-  const [diffArgs, setDiffArgs] = useState<PreviewDiffArgs | null>(null);
-  // Bumped on each preview so an identical (path, branch) re-reads the repo.
+  const [diffArgsList, setDiffArgsList] = useState<PreviewDiffArgs[]>([]);
+  // Bumped on each preview so identical args re-read the repo.
   const [diffNonce, setDiffNonce] = useState(0);
 
-  const diffQuery = useQuery({
-    queryKey: [
-      "github",
-      "diff",
-      connection?.owner,
-      connection?.repo,
-      diffArgs?.path,
-      diffArgs?.branch,
-      diffArgs?.extension,
-      diffNonce,
-    ],
-    enabled: !!connection && !!diffArgs,
-    staleTime: 0,
-    gcTime: 0,
-    queryFn: async () => {
-      const conn = connection!;
-      const args = diffArgs!;
-      // The target branch usually doesn't exist yet, so fall back to the base
-      // branch — that is the content the new commit will actually replace.
-      let oldContent = await getFileContent(conn, args.path, args.branch);
-      if (oldContent === null && args.branch !== conn.baseBranch) {
-        oldContent = await getFileContent(conn, args.path, conn.baseBranch);
-      }
-      return computeDiff(args.extension, oldContent, args.content);
-    },
+  const diffQueries = useQueries({
+    queries: diffArgsList.map((args) => ({
+      queryKey: [
+        "github",
+        "diff",
+        args.targetId,
+        args.owner,
+        args.repo,
+        args.path,
+        args.branch,
+        args.extension,
+        diffNonce,
+      ],
+      enabled: !!auth,
+      staleTime: 0,
+      gcTime: 0,
+      queryFn: async (): Promise<DiffResult> => {
+        const conn: GitHubConnection = {
+          ...auth!,
+          owner: args.owner,
+          repo: args.repo,
+          baseBranch: args.baseBranch,
+        };
+        // The target branch usually doesn't exist yet, so fall back to the
+        // base branch — that is the content the new commit will replace.
+        let oldContent = await getFileContent(conn, args.path, args.branch);
+        if (oldContent === null && args.branch !== args.baseBranch) {
+          oldContent = await getFileContent(conn, args.path, args.baseBranch);
+        }
+        return computeDiff(args.extension, oldContent, args.content);
+      },
+    })),
   });
+
+  const diffs = useMemo<Record<string, TargetDiffState>>(() => {
+    const map: Record<string, TargetDiffState> = {};
+    diffArgsList.forEach((args, index) => {
+      const query = diffQueries[index];
+      map[args.targetId] = {
+        diff: query?.data ?? null,
+        status: query?.isFetching ? "loading" : query?.isError ? "error" : "idle",
+        error: query?.isError ? messageOf(query.error) : null,
+      };
+    });
+    return map;
+  }, [diffArgsList, diffQueries]);
 
   // --- Public API ------------------------------------------------------------
 
@@ -342,10 +518,10 @@ export function useGitHub(): UseGitHubReturn {
     [unlockMutation.mutateAsync],
   );
 
-  const push = useCallback(
-    async (args: PushArgs): Promise<boolean> => {
+  const pushGroups = useCallback(
+    async (groups: PushGroupInput[]): Promise<boolean> => {
       try {
-        await pushMutation.mutateAsync(args);
+        await pushMutation.mutateAsync(groups);
         return true;
       } catch {
         return false;
@@ -354,33 +530,35 @@ export function useGitHub(): UseGitHubReturn {
     [pushMutation.mutateAsync],
   );
 
-  const previewDiff = useCallback((args: PreviewDiffArgs) => {
-    setDiffArgs(args);
+  const previewDiffs = useCallback((args: PreviewDiffArgs[]) => {
+    setDiffArgsList(args);
     setDiffNonce((nonce) => nonce + 1);
   }, []);
 
-  const clearDiff = useCallback(() => {
-    setDiffArgs(null);
+  const clearDiffs = useCallback(() => {
+    setDiffArgsList([]);
   }, []);
 
   const reset = useCallback(() => {
     connectMutation.reset();
     unlockMutation.reset();
     pushMutation.reset();
-    setDiffArgs(null);
+    setDiffArgsList([]);
+    setPushProgress(null);
   }, [connectMutation.reset, unlockMutation.reset, pushMutation.reset]);
 
   const disconnect = useCallback(() => {
     save(null);
-    setSessionMeta(null);
+    setSessionIdentity(null);
     setSessionToken(null);
     connectMutation.reset();
     unlockMutation.reset();
     pushMutation.reset();
-    setDiffArgs(null);
+    setDiffArgsList([]);
+    setPushProgress(null);
   }, [save, connectMutation.reset, unlockMutation.reset, pushMutation.reset]);
 
-  // --- Derived status/error/result (keeps the public shape stable) ----------
+  // --- Derived status/error (keeps the public shape stable) ------------------
 
   const status: GitHubStatus =
     connectMutation.isPending || unlockMutation.isPending
@@ -397,32 +575,24 @@ export function useGitHub(): UseGitHubReturn {
     connectMutation.error ?? unlockMutation.error ?? pushMutation.error ?? null;
   const error = firstError ? messageOf(firstError) : null;
 
-  const diffStatus: DiffStatus = !diffArgs
-    ? "idle"
-    : diffQuery.isFetching
-      ? "loading"
-      : diffQuery.isError
-        ? "error"
-        : "idle";
-
   return {
     meta,
+    repoScope,
     isConnected,
     isLocked,
-    connection,
+    auth,
     isLoaded: loaded,
     status,
     error,
-    result: pushMutation.data ?? null,
     connect,
     unlock,
     disconnect,
-    push,
+    pushGroups,
+    groupResults: pushMutation.data ?? null,
+    pushProgress,
     reset,
-    diff: diffArgs ? (diffQuery.data ?? null) : null,
-    diffStatus,
-    diffError: diffArgs && diffQuery.isError ? messageOf(diffQuery.error) : null,
-    previewDiff,
-    clearDiff,
+    diffs,
+    previewDiffs,
+    clearDiffs,
   };
 }

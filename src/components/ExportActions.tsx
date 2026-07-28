@@ -5,10 +5,6 @@ import { GitHubButton } from "./github/GitHubButton";
 
 interface ExportActionsProps {
     canExport: boolean;
-    exportedData: string;
-    filename: string;
-    /** File extension used for the download and the GitHub path (no dot). */
-    fileFormat: string;
     onDownload: () => void;
 }
 
@@ -20,15 +16,12 @@ interface ExportActionsProps {
  */
 export const ExportActions: React.FC<ExportActionsProps> = ({
     canExport,
-    exportedData,
-    filename,
-    fileFormat,
     onDownload
 }) => (
     <Flex gap="2" align="stretch">
         <ExportButton hasExportedData={canExport} onDownload={onDownload} />
         <div style={{ flex: 1, minWidth: 0 }}>
-            <GitHubButton data={exportedData} filename={filename} fileFormat={fileFormat} />
+            <GitHubButton disabled={!canExport} />
         </div>
     </Flex>
 );

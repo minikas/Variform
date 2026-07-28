@@ -13,6 +13,8 @@ interface ParserSelectProps {
    * description as data (e.g. CSS, or the variables-only DSCG JSON).
    */
   show?: boolean;
+  /** Unique trigger id (it can appear under several checked formats). */
+  id?: string;
 }
 
 /**
@@ -20,7 +22,7 @@ interface ParserSelectProps {
  * string before it is exported (e.g. "Description to JSON"). The choice is
  * shared across views and persisted via the SelectionContext.
  */
-export const ParserSelect: React.FC<ParserSelectProps> = ({ show = true }) => {
+export const ParserSelect: React.FC<ParserSelectProps> = ({ show = true, id = "varvar-parser-select" }) => {
   const { parserId, setParserId } = useSelection();
 
   if (!show) return null;
@@ -28,13 +30,13 @@ export const ParserSelect: React.FC<ParserSelectProps> = ({ show = true }) => {
   return (
     <Flex direction="column" gap="1">
       <Label
-        htmlFor="varvar-parser-select"
+        htmlFor={id}
         style={{ color: "var(--figma-color-text-secondary)" }}
       >
         Parser
       </Label>
       <Select.Root value={parserId} onValueChange={setParserId}>
-        <Select.Trigger id="varvar-parser-select" placeholder={NO_PARSER_LABEL} />
+        <Select.Trigger id={id} placeholder={NO_PARSER_LABEL} />
         <Select.Content portal>
           <Select.Item value={NO_PARSER_ID}>{NO_PARSER_LABEL}</Select.Item>
           {descriptionParsers.map((parser) => (

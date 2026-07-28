@@ -1,27 +1,37 @@
-import React, { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Dialog, Button, Input, Textarea, Switch, Select, Label, Text, Flex, Link } from "figma-kit";
 import { UseGitHubReturn } from "../../hooks/useGitHub";
 import {
+  allFilesResolved,
+  exportFileKey,
+  resolvedFilesFor,
+  useTargetExports,
+} from "../../hooks/useTargetExports";
+import {
   defaultBranchName,
   defaultCommitMessage,
-  defaultPrBody,
 } from "../../utils/github/branchName";
+import { listRepositories } from "../../utils/github/githubApi";
+import {
+  PushTarget,
+  PushTargetGroup,
+  TargetFormatOptions,
+  defaultTargetFolder,
+  deriveTargets,
+  groupTargets,
+  targetFiles,
+} from "../../utils/github/pushTargets";
+import { OutputFormats } from "../../types.d";
 import { DiffList } from "./DiffList";
+import { TargetRow } from "./TargetRow";
 import { useSelection } from "../../contexts/SelectionContext";
 import { SectionAccordion } from "../SectionAccordion";
-import { listBranches, listRepositories } from "../../utils/github/githubApi";
 
 interface GitHubDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   github: UseGitHubReturn;
-  /** The already-exported file contents to commit. */
-  data: string;
-  /** Filename (without extension) used to seed the path and branch. */
-  filename: string;
-  /** File extension, e.g. "json" / "css". */
-  fileFormat: string;
 }
 
 const secondaryText: React.CSSProperties = {
@@ -39,27 +49,6 @@ const controlsStyle: React.CSSProperties = {
   padding: "var(--space-3) var(--space-4)",
 };
 
-const iconButtonStyle: React.CSSProperties = {
-  all: "unset",
-  boxSizing: "border-box",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  width: "28px",
-  height: "28px",
-  flexShrink: 0,
-  borderRadius: "4px",
-  border: "1px solid var(--figma-color-border)",
-  color: "var(--figma-color-text-secondary)",
-};
-
-function messageOf(error: unknown): string {
-  return error instanceof Error
-    ? error.message
-    : "Unexpected error contacting GitHub.";
-}
-
 /** Label + control + optional hint, matching the plugin's existing form style. */
 const Field: React.FC<{
   label: string;
@@ -74,57 +63,95 @@ const Field: React.FC<{
   </Flex>
 );
 
+/** Number of concrete files a group pushes (a "both" target produces two). */
+function groupFileCount(
+  group: PushTargetGroup,
+  filenames: Partial<Record<string, string>>,
+): number {
+  return group.targets.reduce(
+    (count, target) => count + targetFiles(target, filenames).length,
+    0,
+  );
+}
+
+/** Default commit message for a group: per-file when single, generic otherwise. */
+function defaultGroupMessage(
+  group: PushTargetGroup,
+  filenames: Partial<Record<string, string>>,
+): string {
+  const fileCount = groupFileCount(group, filenames);
+  return fileCount === 1
+    ? defaultCommitMessage(targetFiles(group.targets[0], filenames)[0].path)
+    : `chore: update ${fileCount} token files via Variform`;
+}
+
+/** Per-group edits made in the dialog (commit message / create-PR switch). */
+interface GroupEdit {
+  message?: string;
+  createPr?: boolean;
+}
+
 /**
- * Dialog driving the connect → commit → pull request flow. It renders one of
- * three phases based on the hook state: a connect form when no repository is
- * linked, a push form once connected, and a success summary after a push.
+ * Dialog driving the connect → push flow (decision D7). The push phase is a
+ * list of per-format targets grouped by `${owner}/${repo}#${branch}`: each
+ * group lands as one atomic commit (and at most one PR), with an aggregated
+ * per-file diff preview per group. Export contents are pulled from the plugin
+ * sandbox by the dialog itself (useTargetExports) — no `data` prop anymore.
  */
 export const GitHubDialog: React.FC<GitHubDialogProps> = ({
   open,
   onOpenChange,
   github,
-  data,
-  filename,
-  fileFormat,
 }) => {
-  const { connection, meta, isLocked, status, error, result } = github;
-  const { githubFilePath, setGithubFilePath } = useSelection();
+  const {
+    auth,
+    meta,
+    repoScope,
+    isConnected,
+    isLocked,
+    status,
+    error,
+    groupResults,
+    pushProgress,
+  } = github;
+  const {
+    pushTargets,
+    setPushTargets,
+    formats: checkedFormats,
+    filenameByFormat,
+    useRowColumnPos,
+    useDSCGFormat,
+    tailwindOutput,
+    tailwindPrefix,
+    tailwindUnit,
+    tailwindColorMode,
+  } = useSelection();
   const isBusy = status === "verifying" || status === "pushing";
 
   // Connect form state
   const [token, setToken] = useState("");
-  const [selectedRepoFullName, setSelectedRepoFullName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
   const [persist, setPersist] = useState(false);
   const [passphrase, setPassphrase] = useState("");
 
   // Unlock form state
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
 
-  // Repositories + branches for the entered token (loaded on "Validate").
-  // The query keys are deliberately token-independent: the PAT must never sit
-  // in the TanStack cache (visible in devtools). The token itself is captured
-  // by the queryFn closure, and handleTokenChange drops the cached data.
-  const queryClient = useQueryClient();
+  // Per-group commit message / create-PR edits, keyed by group key.
+  const [groupEdits, setGroupEdits] = useState<Record<string, GroupEdit>>({});
+
+  // Export contents for every target, resolved by the dialog (decision D4).
+  const { exports: targetExports, isLoading: isExporting } =
+    useTargetExports(pushTargets);
+
+  // Repositories the token can access, for the per-target repo pickers. The
+  // query key carries the login so a different account never sees stale repos;
+  // the token itself stays out of the cache key.
   const reposQuery = useQuery({
-    queryKey: ["github", "repos"],
-    queryFn: () => listRepositories({ token: token.trim() }),
-    enabled: false,
+    queryKey: ["github", "repos", meta?.login ?? "session"],
+    enabled: open && !!auth,
+    queryFn: () => listRepositories(auth!),
   });
   const repos = reposQuery.data ?? null;
-  const selectedRepo = repos?.find((item) => item.fullName === selectedRepoFullName);
-  const branchesQuery = useQuery({
-    queryKey: ["github", "branches", selectedRepo?.owner, selectedRepo?.repo],
-    queryFn: () => listBranches({ token: token.trim() }, selectedRepo!.owner, selectedRepo!.repo),
-    enabled: Boolean(token.trim() && selectedRepo),
-  });
-  const branches = branchesQuery.data ?? null;
-
-  // Push form state
-  const [path, setPath] = useState("");
-  const [commitMessage, setCommitMessage] = useState("");
-  const [branch, setBranch] = useState("");
-  const [openPr, setOpenPr] = useState(true);
 
   // Clear transient status whenever the dialog is opened.
   useEffect(() => {
@@ -133,76 +160,124 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
     }
   }, [open, github.reset]);
 
-  // Seed push-form defaults once a connection exists and the dialog is open.
-  // Only fill EMPTY fields, so the branch (and any edits) persist across reopens.
-  // That way re-committing targets the SAME branch/PR and the diff is measured
-  // against it (showing "no changes" once pushed) instead of re-diffing a fresh
-  // branch against the base every time.
+  // Seed format options of a new target from the global (per-document) export
+  // options, so a target starts consistent with the preview the user tuned.
+  // Exception: Tailwind targets default to "both" outputs (stylesheet + preset
+  // as two files with independent paths), regardless of the single-file
+  // preview option.
+  const seedFormatOptions = (format: OutputFormats): TargetFormatOptions => ({
+    useRowColumnPos,
+    useDSCGFormat,
+    tailwindOutput:
+      format === OutputFormats.TAILWIND ? "both" : tailwindOutput,
+    tailwindPrefix,
+    tailwindUnit,
+    tailwindColorMode,
+  });
+
+  // The seeded folder of a Tailwind "both" target is the stylesheet's; the
+  // preset file lands at the repo root unless presetFolder is set.
+  const seedTargetFolder = (format: OutputFormats): string =>
+    defaultTargetFolder(
+      format,
+      format === OutputFormats.TAILWIND ? "css" : tailwindOutput,
+    );
+
+  // Derive the target set from the main page's checked formats, once per
+  // dialog open (idempotent): each checked format reuses the persisted target
+  // with the same format or gets a new one with defaults; persisted targets
+  // of unchecked formats (ad-hoc additions) are kept. Targets without a
+  // repository (e.g. migrated from a legacy githubFilePath) first inherit the
+  // repo recovered from a legacy connection.
+  const derivedOnOpenRef = useRef(false);
   useEffect(() => {
-    if (open && connection) {
-      const seededPath = githubFilePath || `src/${filename}.${fileFormat}`;
-      setPath((prev) => prev || seededPath);
-      setCommitMessage((prev) => prev || defaultCommitMessage(seededPath));
-      setBranch(
-        (prev) => prev || defaultBranchName(filename, Date.now().toString(36).slice(-4)),
+    if (!open) {
+      derivedOnOpenRef.current = false;
+      return;
+    }
+    if (!isConnected || isLocked || derivedOnOpenRef.current) {
+      return;
+    }
+    derivedOnOpenRef.current = true;
+    let targets = pushTargets;
+    if (repoScope && targets.some((t) => !t.owner.trim() && !t.repo.trim())) {
+      targets = targets.map((t) =>
+        !t.owner.trim() && !t.repo.trim()
+          ? {
+              ...t,
+              owner: repoScope.owner,
+              repo: repoScope.repo,
+              baseBranch: t.baseBranch || repoScope.baseBranch,
+            }
+          : t,
       );
     }
-  }, [open, connection, filename, fileFormat, githubFilePath]);
+    const existing = targets[0];
+    const derived = deriveTargets(checkedFormats, targets, {
+      // Share the session branch seed so same-repo targets keep grouping.
+      branch:
+        existing?.branch ||
+        defaultBranchName("variables", Date.now().toString(36).slice(-4)),
+      repo:
+        existing && existing.owner.trim() && existing.repo.trim()
+          ? {
+              owner: existing.owner,
+              repo: existing.repo,
+              baseBranch: existing.baseBranch,
+            }
+          : (repoScope ?? undefined),
+      formatOptions: seedFormatOptions,
+      folder: seedTargetFolder,
+    });
+    setPushTargets(derived);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- derivation runs once per dialog open.
+  }, [open, isConnected, isLocked, pushTargets, repoScope, checkedFormats]);
 
-  // Auto-preview the diff while the push form is open, and re-fetch (debounced)
-  // whenever the path / branch / content change, so "Changes" always reflects
-  // the current inputs without a manual click.
+  const updateTarget = (id: string, patch: Partial<PushTarget>) => {
+    setPushTargets(pushTargets.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  };
+
+  // Grouping (decision D2): one atomic commit per repo+branch group.
+  const groups = useMemo(() => groupTargets(pushTargets), [pushTargets]);
+
+  // Auto-preview the per-file diffs (debounced) whenever the targets or the
+  // exported contents change, so "Changes" always reflects the current inputs.
   useEffect(() => {
-    if (
-      !open ||
-      !connection ||
-      isLocked ||
-      isBusy ||
-      status === "success" ||
-      !path.trim() ||
-      !branch.trim() ||
-      !data
-    ) {
+    if (!open || !auth || isLocked || isBusy || status === "success") {
       return;
     }
+    const args = pushTargets
+      .filter(
+        (t) =>
+          t.owner.trim() && t.repo.trim() && t.branch.trim(),
+      )
+      .flatMap((t) =>
+        resolvedFilesFor(t, filenameByFormat, targetExports)
+          .filter((file) => file.content)
+          .map((file) => ({
+            targetId: file.key,
+            owner: t.owner.trim(),
+            repo: t.repo.trim(),
+            baseBranch: t.baseBranch.trim() || "main",
+            branch: t.branch.trim(),
+            path: file.path.trim(),
+            extension: file.extension,
+            content: file.content,
+          })),
+      );
     const handle = setTimeout(() => {
-      github.previewDiff({
-        path: path.trim(),
-        branch: branch.trim(),
-        content: data,
-        extension: fileFormat,
-      });
+      if (args.length > 0) {
+        github.previewDiffs(args);
+      } else {
+        github.clearDiffs();
+      }
     }, 400);
     return () => clearTimeout(handle);
-  }, [open, connection, isLocked, isBusy, status, path, branch, data, fileFormat, github.previewDiff]);
-
-  const handleTokenChange = (value: string) => {
-    setToken(value);
-    // The repository list is keyed independently of the token; drop the cached
-    // data so a previous token's repos/branches never show for the new one.
-    setSelectedRepoFullName("");
-    queryClient.removeQueries({ queryKey: ["github", "repos"] });
-    queryClient.removeQueries({ queryKey: ["github", "branches"] });
-  };
-
-  const handleSelectRepo = (fullName: string) => {
-    setSelectedRepoFullName(fullName);
-    const summary = repos?.find((item) => item.fullName === fullName);
-    if (summary) {
-      setBaseBranch(summary.defaultBranch);
-    }
-  };
+  }, [open, auth, isLocked, isBusy, status, pushTargets, filenameByFormat, targetExports, github.previewDiffs, github.clearDiffs]);
 
   const handleConnect = async () => {
-    const summary = repos?.find((item) => item.fullName === selectedRepoFullName);
-    if (!summary) {
-      return;
-    }
     const ok = await github.connect({
       token: token.trim(),
-      owner: summary.owner,
-      repo: summary.repo,
-      baseBranch: baseBranch.trim() || summary.defaultBranch,
       persist,
       passphrase: persist ? passphrase : undefined,
     });
@@ -210,8 +285,6 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
       // Don't keep secrets in the form fields once the session holds them.
       setToken("");
       setPassphrase("");
-      // Connecting is a setup step — close the modal; reopen to push.
-      onOpenChange(false);
     }
   };
 
@@ -222,47 +295,87 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
     }
   };
 
+  const groupMessage = (group: PushTargetGroup) =>
+    groupEdits[group.key]?.message ?? defaultGroupMessage(group, filenameByFormat);
+  const groupCreatePr = (group: PushTargetGroup) =>
+    groupEdits[group.key]?.createPr ?? group.createPr;
+
+  const editGroup = (key: string, edit: GroupEdit) => {
+    setGroupEdits((prev) => ({ ...prev, [key]: { ...prev[key], ...edit } }));
+  };
+
+  // Two files pushed to the same path in a group would silently overwrite
+  // each other in the commit tree — surface the collision and block the push.
+  const groupDuplicatePaths = (group: PushTargetGroup): string[] => {
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const target of group.targets) {
+      for (const file of targetFiles(target, filenameByFormat)) {
+        const path = file.path.trim();
+        if (!path || duplicates.includes(path)) {
+          continue;
+        }
+        if (seen.has(path)) {
+          duplicates.push(path);
+        } else {
+          seen.add(path);
+        }
+      }
+    }
+    return duplicates;
+  };
+  const hasDuplicatePaths = groups.some(
+    (group) => groupDuplicatePaths(group).length > 0,
+  );
+
+  // Every target must be fully configured and have every produced file's
+  // export resolved before any group can be pushed. Folders may be empty
+  // (repo root) — only repo/branches are required.
+  const targetsReady =
+    pushTargets.length > 0 &&
+    pushTargets.every(
+      (t) =>
+        t.owner.trim() && t.repo.trim() && t.baseBranch.trim() && t.branch.trim(),
+    );
+  const exportsReady = allFilesResolved(pushTargets, filenameByFormat, targetExports);
+  const canPush =
+    targetsReady && exportsReady && !isExporting && !isBusy && !hasDuplicatePaths;
+
+  const anyPr = groups.some((group) => groupCreatePr(group));
+
   const handlePush = async () => {
-    const trimmedPath = path.trim();
-    const message = commitMessage.trim() || defaultCommitMessage(trimmedPath);
-    await github.push({
-      path: trimmedPath,
-      content: data,
-      commitMessage: message,
-      branch: branch.trim(),
-      createPr: openPr,
-      prTitle: message,
-      prBody: defaultPrBody(trimmedPath),
-    });
-  };
-
-  const handlePreviewDiff = () => {
-    github.previewDiff({
-      path: path.trim(),
-      branch: branch.trim(),
-      content: data,
-      extension: fileFormat,
-    });
-  };
-
-  const handleGenerateBranch = () => {
-    setBranch(defaultBranchName(filename, Date.now().toString(36).slice(-4)));
+    await github.pushGroups(
+      groups.map((group) => ({
+        key: group.key,
+        owner: group.owner,
+        repo: group.repo,
+        baseBranch: group.baseBranch,
+        branch: group.branch,
+        message: groupMessage(group),
+        createPr: groupCreatePr(group),
+        targetIds: group.targets.map((t) => t.id),
+        files: group.targets.flatMap((t) =>
+          resolvedFilesFor(t, filenameByFormat, targetExports).map((file) => ({
+            path: file.path.trim(),
+            content: file.content,
+          })),
+        ),
+      })),
+    );
   };
 
   const renderConnectForm = () => {
     const canConnect =
-      Boolean(token.trim() && selectedRepoFullName && baseBranch.trim()) &&
-      (!persist || Boolean(passphrase.trim())) &&
-      !isBusy &&
-      !reposQuery.isFetching &&
-      !branchesQuery.isFetching;
+      Boolean(token.trim()) && (!persist || Boolean(passphrase.trim())) && !isBusy;
     return (
       <>
         <Dialog.Section className="varvar-scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           <Flex direction="column" gap="3">
             <Text style={secondaryText}>
-              Commit the export and open a PR. Your token goes only to GitHub — if
-              remembered, it's encrypted on this device with a passphrase.
+              Connect with a token, then push one or more export formats — each
+              to its own repository, branch and path. Your token goes only to
+              GitHub — if remembered, it's encrypted on this device with a
+              passphrase.
             </Text>
             <Field
               label="Personal access token"
@@ -282,89 +395,16 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
                 </>
               }
             >
-              <Flex gap="2" align="center">
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <Input
-                    id="gh-token"
-                    type="password"
-                    placeholder="ghp_…"
-                    value={token}
-                    autoComplete="off"
-                    style={{ width: "100%" }}
-                    onChange={(e) => handleTokenChange(e.target.value)}
-                  />
-                </div>
-                <Button
-                  variant="secondary"
-                  style={{ flexShrink: 0 }}
-                  disabled={!token.trim() || reposQuery.isFetching}
-                  onClick={() => reposQuery.refetch()}
-                >
-                  {reposQuery.isFetching ? "Validating…" : "Validate"}
-                </Button>
-              </Flex>
+              <Input
+                id="gh-token"
+                type="password"
+                placeholder="ghp_…"
+                value={token}
+                autoComplete="off"
+                style={{ width: "100%" }}
+                onChange={(e) => setToken(e.target.value)}
+              />
             </Field>
-            {reposQuery.isError ? (
-              <Text style={dangerText}>{messageOf(reposQuery.error)}</Text>
-            ) : null}
-
-            {repos ? (
-              <Field label="Repository" htmlFor="gh-repo-select">
-                <Select.Root value={selectedRepoFullName} onValueChange={handleSelectRepo}>
-                  <Select.Trigger
-                    id="gh-repo-select"
-                    placeholder={
-                      repos.length
-                        ? "Select a repository"
-                        : "No repositories found for this token"
-                    }
-                  />
-                  <Select.Content portal style={{ maxHeight: 280, overflowY: "auto" }}>
-                    {[...repos]
-                      .sort((a, b) => a.fullName.localeCompare(b.fullName))
-                      .map((item) => (
-                        <Select.Item
-                          key={item.fullName}
-                          value={item.fullName}
-                          disabled={!item.canPush}
-                        >
-                          {item.canPush
-                            ? item.fullName
-                            : `${item.fullName} (no push access)`}
-                        </Select.Item>
-                      ))}
-                  </Select.Content>
-                </Select.Root>
-              </Field>
-            ) : null}
-
-            {selectedRepoFullName ? (
-              <Field
-                label="Base branch"
-                htmlFor="gh-branch-select"
-                hint="New branches and pull requests are based on this."
-              >
-                {branchesQuery.isFetching ? (
-                  <Text style={secondaryText}>Loading branches…</Text>
-                ) : (
-                  <Select.Root value={baseBranch} onValueChange={setBaseBranch}>
-                    <Select.Trigger id="gh-branch-select" placeholder="Select a branch" />
-                    <Select.Content portal style={{ maxHeight: 280, overflowY: "auto" }}>
-                      {[...(branches ?? [])]
-                        .sort((a, b) => a.localeCompare(b))
-                        .map((name) => (
-                          <Select.Item key={name} value={name}>
-                            {name}
-                          </Select.Item>
-                        ))}
-                    </Select.Content>
-                  </Select.Root>
-                )}
-                {branchesQuery.isError ? (
-                  <Text style={dangerText}>{messageOf(branchesQuery.error)}</Text>
-                ) : null}
-              </Field>
-            ) : null}
 
             <Flex gap="2" align="center">
               <Switch
@@ -406,204 +446,187 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
     );
   };
 
-  const renderPushForm = () => {
-    // Nothing to commit when the previewed diff is empty.
-    const noChanges = github.diff !== null && github.diff.changes.length === 0;
-    const canPush =
-      Boolean(path.trim() && branch.trim() && data) && !isBusy && !noChanges;
+  // One diff block per produced file of a target ("both" → two blocks).
+  const renderTargetDiffs = (target: PushTarget) =>
+    resolvedFilesFor(target, filenameByFormat, targetExports).map((file) => {
+      const state = github.diffs[file.key];
+      return (
+        <Flex direction="column" gap="1" key={file.key}>
+          <Text size="small" style={secondaryText}>
+            {file.path}
+          </Text>
+          {state?.error ? (
+            <Text style={dangerText}>{state.error}</Text>
+          ) : state?.status === "loading" && !state.diff ? (
+            <Text size="small" style={secondaryText}>Loading diff…</Text>
+          ) : state?.diff ? (
+            <DiffList diff={state.diff} />
+          ) : (
+            <Text size="small" style={secondaryText}>No diff preview yet.</Text>
+          )}
+        </Flex>
+      );
+    });
+
+  // Collapsed group summary: basename of the first file, with "+N" for the
+  // remaining FILES of the group (e.g. "tokens.css, +1").
+  const groupFileSummary = (group: PushTargetGroup): string => {
+    const fileCount = groupFileCount(group, filenameByFormat);
+    const firstPath = targetFiles(group.targets[0], filenameByFormat)[0]?.path ?? "";
+    const firstName = firstPath.split("/").pop() || firstPath;
+    return fileCount > 1 ? `${firstName}, +${fileCount - 1}` : firstName;
+  };
+
+  const renderPushForm = () => (
+    <>
+      <Dialog.Section className="varvar-scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <Flex direction="column" gap="3">
+          <Flex justify="between" align="center">
+            <Text style={secondaryText}>
+              Connected{meta?.login ? (
+                <> as <strong>{meta.login}</strong></>
+              ) : null}
+            </Text>
+            <Button
+              variant="text"
+              onClick={() => github.disconnect()}
+              style={{ color: "var(--figma-color-text-danger)" }}
+            >
+              Disconnect
+            </Button>
+          </Flex>
+
+          {pushTargets.map((target) => (
+            <TargetRow
+              key={target.id}
+              target={target}
+              auth={auth}
+              repos={repos}
+              reposLoading={reposQuery.isFetching}
+              exportStates={targetFiles(target, filenameByFormat).map((file, index) =>
+                targetExports[exportFileKey(target.id, file, index)],
+              )}
+              onChange={(patch) => updateTarget(target.id, patch)}
+            />
+          ))}
+
+          {groups.length > 0 ? (
+            <Flex direction="column" gap="2">
+              <Label>Changes</Label>
+              {groups.map((group) => (
+                <SectionAccordion
+                  key={group.key}
+                  label={`${group.owner}/${group.repo}`}
+                  summary={groupFileSummary(group)}
+                >
+                  <Flex direction="column" gap="3">
+                    <Text size="small" style={secondaryText}>
+                      Branch: {group.branch}
+                    </Text>
+                    {groupDuplicatePaths(group).map((path) => (
+                      <Text key={path} size="small" style={dangerText}>
+                        Duplicate file path in this push: {path} — give each
+                        file its own path.
+                      </Text>
+                    ))}
+                    <Flex direction="column" gap="1">
+                      <Label htmlFor={`gh-group-msg-${group.key}`}>Commit message</Label>
+                      <Textarea
+                        id={`gh-group-msg-${group.key}`}
+                        rows={2}
+                        value={groupMessage(group)}
+                        onChange={(e) => editGroup(group.key, { message: e.target.value })}
+                      />
+                    </Flex>
+                    <Flex gap="2" align="center">
+                      <Switch
+                        id={`gh-group-pr-${group.key}`}
+                        checked={groupCreatePr(group)}
+                        onCheckedChange={(checked) =>
+                          editGroup(group.key, { createPr: Boolean(checked) })
+                        }
+                      />
+                      <Label htmlFor={`gh-group-pr-${group.key}`}>
+                        Open a pull request after committing
+                      </Label>
+                    </Flex>
+                    {group.targets.map(renderTargetDiffs)}
+                  </Flex>
+                </SectionAccordion>
+              ))}
+            </Flex>
+          ) : null}
+
+          {error ? <Text style={dangerText}>{error}</Text> : null}
+        </Flex>
+      </Dialog.Section>
+      <Dialog.Controls style={controlsStyle}>
+        <Button variant="secondary" onClick={() => onOpenChange(false)}>
+          Cancel
+        </Button>
+        <Button variant="primary" disabled={!canPush} onClick={handlePush}>
+          {status === "pushing"
+            ? pushProgress
+              ? `Pushing ${pushProgress.done}/${pushProgress.total}…`
+              : "Pushing…"
+            : isExporting
+              ? "Exporting…"
+              : anyPr
+                ? "Commit & create PRs"
+                : "Commit"}
+        </Button>
+      </Dialog.Controls>
+    </>
+  );
+
+  const renderResult = () => {
+    const results = groupResults ?? [];
+    const succeeded = results.filter((r) => r.result).length;
+    const partial = succeeded > 0 && succeeded < results.length;
     return (
       <>
         <Dialog.Section className="varvar-scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <Flex direction="column" gap="3">
-            <Flex justify="between" align="center">
-              <Text style={secondaryText}>
-                Connected to <strong>{connection?.owner}/{connection?.repo}</strong>
-              </Text>
-              <Button
-                variant="text"
-                onClick={() => github.disconnect()}
-                style={{ color: "var(--figma-color-text-danger)" }}
-              >
-                Disconnect
-              </Button>
-            </Flex>
-            <Field label="Commit message" htmlFor="gh-commit">
-              <Textarea
-                id="gh-commit"
-                rows={2}
-                value={commitMessage}
-                onChange={(e) => setCommitMessage(e.target.value)}
-              />
-            </Field>
-
-            <SectionAccordion label="Options" summary={path}>
-              <Flex direction="column" gap="3">
-                <Field
-                  label="File path"
-                  htmlFor="gh-path"
-                  hint="Path within the repository, including the filename."
-                >
-                  <Input
-                    id="gh-path"
-                    placeholder="tokens/variables.json"
-                    value={path}
-                    onChange={(e) => {
-                      setPath(e.target.value);
-                      setGithubFilePath(e.target.value);
-                    }}
-                  />
-                </Field>
-                <Field
-                  label="Branch"
-                  htmlFor="gh-branch"
-                  hint={`Created from ${connection?.baseBranch || "the base branch"} if it doesn't exist.`}
-                >
-                  <Flex gap="2" align="center">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <Input
-                        id="gh-branch"
-                        value={branch}
-                        style={{ width: "100%" }}
-                        onChange={(e) => setBranch(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      aria-label="Generate a new branch name"
-                      title="Generate a new branch name"
-                      onClick={handleGenerateBranch}
-                      style={iconButtonStyle}
-                    >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                        <path d="M3 3v5h5" />
-                        <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                        <path d="M16 16h5v5" />
-                      </svg>
-                    </button>
-                  </Flex>
-                </Field>
-                <Flex gap="2" align="center">
-                  <Switch
-                    id="gh-open-pr"
-                    checked={openPr}
-                    onCheckedChange={(checked) => setOpenPr(Boolean(checked))}
-                  />
-                  <Label htmlFor="gh-open-pr">Open a pull request after committing</Label>
-                </Flex>
+          <Flex direction="column" gap="3" style={{ padding: "12px 0" }}>
+            <Text size="large" weight="strong">
+              {succeeded === results.length
+                ? "Pushed to GitHub"
+                : partial
+                  ? `Partially pushed (${succeeded}/${results.length} groups)`
+                  : "Push failed"}
+            </Text>
+            {results.map((r) => (
+              <Flex direction="column" gap="1" key={r.key}>
+                <Text weight="strong">
+                  {r.owner}/{r.repo} · {r.branch}
+                </Text>
+                {r.result ? (
+                  r.result.prUrl ? (
+                    <Link href={r.result.prUrl} target="_blank" rel="noopener noreferrer">
+                      Open pull request ↗
+                    </Link>
+                  ) : (
+                    <Text style={secondaryText}>
+                      Committed. No pull request was created automatically.{" "}
+                      <Link href={r.result.compareUrl} target="_blank" rel="noopener noreferrer">
+                        Open one ↗
+                      </Link>
+                    </Text>
+                  )
+                ) : (
+                  <Text style={dangerText}>{r.error}</Text>
+                )}
               </Flex>
-            </SectionAccordion>
-
-            <Flex direction="column" gap="2">
-              <Flex justify="between" align="center">
-                <Label>Changes</Label>
-                <Button
-                  variant="secondary"
-                  disabled={
-                    !path.trim() || !branch.trim() || !data || github.diffStatus === "loading"
-                  }
-                  onClick={handlePreviewDiff}
-                >
-                  {github.diffStatus === "loading" ? "Loading…" : "Refresh"}
-                </Button>
-              </Flex>
-              {github.diffError ? (
-                <Text style={dangerText}>{github.diffError}</Text>
-              ) : null}
-              {github.diffStatus === "loading" && !github.diff ? (
-                <div
-                  style={{
-                    border: "1px solid var(--figma-color-border)",
-                    borderRadius: 4,
-                    padding: 8,
-                  }}
-                  aria-hidden
-                >
-                  <Flex direction="column" gap="2">
-                    {["70%", "45%", "85%", "55%", "65%", "40%"].map((width, index) => (
-                      <div key={index} className="varvar-skeleton-line" style={{ width }} />
-                    ))}
-                  </Flex>
-                </div>
-              ) : null}
-              {github.diff ? <DiffList diff={github.diff} /> : null}
-            </Flex>
-
-            {error ? <Text style={dangerText}>{error}</Text> : null}
+            ))}
           </Flex>
         </Dialog.Section>
         <Dialog.Controls style={controlsStyle}>
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button variant="primary" disabled={!canPush} onClick={handlePush}>
-            {status === "pushing"
-              ? "Pushing…"
-              : openPr
-                ? "Commit & create PR"
-                : "Commit"}
+          <Button variant="primary" onClick={() => onOpenChange(false)}>
+            Done
           </Button>
         </Dialog.Controls>
       </>
     );
   };
-
-  const renderSuccess = () => (
-    <>
-      <Dialog.Section className="varvar-scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        <Flex
-          direction="column"
-          align="center"
-          gap="3"
-          style={{ textAlign: "center", padding: "12px 0" }}
-        >
-          <svg width="48" height="48" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="11" fill="var(--figma-color-icon-success, #14ae5c)" />
-            <path
-              d="M7.5 12.5l3 3 6-7"
-              fill="none"
-              stroke="#ffffff"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <Text size="large" weight="strong">Pushed to GitHub</Text>
-          <Text style={secondaryText}>
-            Committed to <strong>{result?.branch}</strong> in{" "}
-            <strong>{connection?.owner}/{connection?.repo}</strong>.
-          </Text>
-          {result?.prUrl ? (
-            <Link href={result.prUrl} target="_blank" rel="noopener noreferrer">
-              Open pull request ↗
-            </Link>
-          ) : (
-            <Text style={secondaryText}>
-              No pull request was created automatically.{" "}
-              <Link href={result?.compareUrl} target="_blank" rel="noopener noreferrer">
-                Open one ↗
-              </Link>
-            </Text>
-          )}
-        </Flex>
-      </Dialog.Section>
-      <Dialog.Controls style={controlsStyle}>
-        <Button variant="primary" onClick={() => onOpenChange(false)}>
-          Done
-        </Button>
-      </Dialog.Controls>
-    </>
-  );
 
   const renderUnlockForm = () => {
     const canUnlock = Boolean(unlockPassphrase) && status !== "verifying";
@@ -613,7 +636,9 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
           <Flex direction="column" gap="3">
             <Flex justify="between" align="center">
               <Text style={secondaryText}>
-                Locked: <strong>{meta?.owner}/{meta?.repo}</strong>
+                Locked{meta?.login ? (
+                  <>: <strong>{meta.login}</strong></>
+                ) : null}
               </Text>
               <Button
                 variant="text"
@@ -652,23 +677,23 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
   };
 
   const renderBody = () => {
-    if (!meta) {
+    if (!isConnected) {
       return renderConnectForm();
     }
     if (isLocked) {
       return renderUnlockForm();
     }
-    if (status === "success" && result) {
-      return renderSuccess();
+    if (status === "success" && groupResults) {
+      return renderResult();
     }
     return renderPushForm();
   };
 
-  const title = !meta
+  const title = !isConnected
     ? "Connect to GitHub"
     : isLocked
       ? "Unlock GitHub"
-      : status === "success" && result
+      : status === "success" && groupResults
         ? "Pushed to GitHub"
         : "Push to GitHub";
 
@@ -679,7 +704,7 @@ export const GitHubDialog: React.FC<GitHubDialogProps> = ({
         <Dialog.Content
           size="1"
           placement="center"
-          width="440px"
+          width="480px"
           maxWidth="92vw"
           style={{ display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: "84vh" }}
         >

@@ -46,9 +46,6 @@ export const ExportJSON: React.FC<ExportJSONProps> = ({ editorType = "" }) => {
 
             <ExportActions
                 canExport={canExport}
-                exportedData={exportedData}
-                filename={filename}
-                fileFormat={format}
                 onDownload={handleDownload}
             />
         </>

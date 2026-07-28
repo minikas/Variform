@@ -21,8 +21,6 @@ export const ExportCSS: React.FC<ExportCSSProps> = ({ editorType = "" }) => {
     const {
         filename,
         setFilename,
-        useTailwindFormat,
-        setUseTailwindFormat,
         exportedData,
         canExport,
         handleDownload
@@ -35,10 +33,8 @@ export const ExportCSS: React.FC<ExportCSSProps> = ({ editorType = "" }) => {
             <ExportOptions
                 format={format}
                 useRowColumnPos={false}
-                useTailwindFormat={useTailwindFormat}
                 filename={filename}
                 onUseRowColumnPosChange={() => {}}
-                onUseTailwindFormatChange={setUseTailwindFormat}
                 onFilenameChange={setFilename}
             />
 
@@ -46,9 +42,6 @@ export const ExportCSS: React.FC<ExportCSSProps> = ({ editorType = "" }) => {
 
             <ExportActions
                 canExport={canExport}
-                exportedData={exportedData}
-                filename={filename}
-                fileFormat={format}
                 onDownload={handleDownload}
             />
         </>

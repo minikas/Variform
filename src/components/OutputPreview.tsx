@@ -17,6 +17,8 @@ interface OutputPreviewProps {
     previewOptions?: PreviewOption[];
     previewOptionValue?: string;
     onPreviewOptionChange?: (value: string) => void;
+    /** Extra controls rendered first in the actions row (e.g. a format picker). */
+    toolbarStart?: React.ReactNode;
 }
 
 /**
@@ -28,7 +30,8 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
     editorType = 'dev',
     previewOptions,
     previewOptionValue,
-    onPreviewOptionChange
+    onPreviewOptionChange,
+    toolbarStart
 }) => {
     const [copyStatus, setCopyStatus] = useState<'idle' | 'success' | 'error'>('idle');
     const [search, setSearch] = useState<string>("");
@@ -78,6 +81,7 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
             <Flex justify="between" align="center" gap="2">
                 <Text>Code Preview</Text>
                 <Flex direction="row" gap="2" align="center">
+                    {toolbarStart}
                     {previewOptions && previewOptions.length > 0 && (
                         <Select.Root
                             value={previewOptionValue}
@@ -100,9 +104,37 @@ export const OutputPreview: React.FC<OutputPreviewProps> = ({
                         variant="secondary"
                         onClick={handleCopy}
                         disabled={copyStatus !== 'idle'}
+                        aria-label="Copy to clipboard"
+                        title={
+                            copyStatus === 'success' ? 'Copied!' :
+                            copyStatus === 'error' ? 'Copy failed' : 'Copy to clipboard'
+                        }
+                        style={{
+                            aspectRatio: "1",
+                            padding: 0,
+                            flexShrink: 0,
+                            color: copyStatus === 'success'
+                                ? 'var(--figma-color-text-success)'
+                                : copyStatus === 'error'
+                                    ? 'var(--figma-color-text-danger)'
+                                    : undefined,
+                        }}
                     >
-                        {copyStatus === 'success' ? '✓ Copied!' :
-                         copyStatus === 'error' ? '✗ Failed' : 'Copy'}
+                        {copyStatus === 'success' ? (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <path d="M20 6 9 17l-5-5" />
+                            </svg>
+                        ) : copyStatus === 'error' ? (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <path d="M18 6 6 18" />
+                                <path d="m6 6 12 12" />
+                            </svg>
+                        ) : (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                        )}
                     </Button>
                     <Input
                         id="varvar-preview-search"

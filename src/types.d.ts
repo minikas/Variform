@@ -179,7 +179,6 @@ export interface PluginMessage {
   command?: PluginCommands;
   format?: OutputFormats;
   useLinkedVarRowAndColPos?: boolean;
-  useTailwindFormat?: boolean;
   useDSCGFormat?: boolean;
   // Tailwind-format options (only meaningful when format === TAILWIND).
   tailwindOutput?: TailwindOutput;

@@ -68,7 +68,6 @@ async function handleBasicInfo(command?: PluginCommands) {
 async function handleExport(
     format: OutputFormats,
     useLinkedVarRowAndColPos: boolean = false,
-    useTailwindFormat: boolean = false,
     useDSCGFormat: boolean = false,
     selection?: ExportSelection,
     styleSelection: StyleSelection = ALL_STYLES,
@@ -96,7 +95,7 @@ async function handleExport(
                 data = await exportToTS(selection, styleSelection, parserId);
                 break;
             case OutputFormats.CSS:
-                data = useTailwindFormat ? await exportToTailwind(selection, styleSelection) : await exportToCSS(selection, styleSelection);
+                data = await exportToCSS(selection, styleSelection);
                 break;
             case OutputFormats.TAILWIND:
                 data = tailwindOutput === "preset"
@@ -288,7 +287,6 @@ figma.ui.onmessage = async (msg: PluginMessage) => {
                 await handleExport(
                     msg.format,
                     msg.useLinkedVarRowAndColPos || false,
-                    msg.useTailwindFormat || false,
                     msg.useDSCGFormat || false,
                     msg.selection,
                     msg.styleSelection ?? ALL_STYLES,

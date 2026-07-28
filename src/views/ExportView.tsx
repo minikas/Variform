@@ -1,10 +1,12 @@
 import React, { useEffect } from "react";
-import { RadioGroup } from "figma-kit";
+import { Checkbox, Select } from "figma-kit";
 import { OutputFormats, TailwindOutput } from "../types.d";
 import { PluginDialogShell } from "../components/PluginDialogShell";
 import { ExportHeader } from "../components/ExportHeader";
 import { SectionAccordion } from "../components/SectionAccordion";
-import { ExportOptions } from "../components/ExportOptions";
+import { FormatOptionsControls } from "../components/FormatOptionsControls";
+import { ParserSelect } from "../components/ParserSelect";
+import { FilenameInput } from "../components/FilenameInput";
 import { CollectionAccordion } from "../components/CollectionAccordion";
 import { ExportActions } from "../components/ExportActions";
 import { OutputPreview } from "../components/OutputPreview";
@@ -12,58 +14,29 @@ import { PreviewSkeleton } from "../components/PreviewSkeleton";
 import { ExportLayout } from "../components/ExportLayout";
 import { useExportData } from "../hooks/useExportData";
 import { useSelection } from "../contexts/SelectionContext";
+import { formatExtension } from "../utils/formatExtension";
+import { defaultFilename } from "../utils/filename";
+import { formatLabel } from "../utils/formatLabel";
 
 interface ExportViewProps {
     editorType?: string;
 }
 
-/** Human-readable label for the currently selected export format. */
-const formatLabel = (format: OutputFormats): string => {
-    switch (format) {
-        case OutputFormats.JSON:
-            return "JSON";
-        case OutputFormats.JS:
-            return "JavaScript";
-        case OutputFormats.CSV:
-            return "CSV";
-        case OutputFormats.CSS:
-            return "CSS";
-        case OutputFormats.TAILWIND:
-            return "Tailwind";
-        case OutputFormats.TS:
-            return "TypeScript";
-        case OutputFormats.REACT_NATIVE:
-            return "React Native";
-        case OutputFormats.TAMAGUI:
-            return "Tamagui";
-        case OutputFormats.SCSS:
-            return "SCSS";
-        case OutputFormats.STYLE_DICTIONARY:
-            return "Style Dictionary";
-        case OutputFormats.SWIFT:
-            return "iOS Swift";
-        case OutputFormats.ANDROID:
-            return "Android";
-        case OutputFormats.FLUTTER:
-            return "Flutter";
-        default:
-            return format;
-    }
-};
+/** Formats offered on the main page, in display order. */
+const ALL_FORMATS = Object.values(OutputFormats);
 
 /**
- * Generic export view with format selector (default command)
+ * Generic export view with a MULTI-FORMAT selector (default command).
+ * Each checked format shows its format-specific options inline; the preview
+ * and download follow the active format (the last checked one). The checked
+ * set is what the GitHub push dialog derives its targets from.
  */
 export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
-    // Format is persisted (per document) in the SelectionContext.
-    const { format, setFormat } = useSelection();
+    // Formats + active format are persisted (per document) in SelectionContext.
+    const { format, formats, setFormat, toggleFormat, filenameByFormat, setFilenameFor } = useSelection();
     const {
-        filename,
-        setFilename,
         useRowColumnPos,
         setUseRowColumnPos,
-        useTailwindFormat,
-        setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
         tailwindOutput,
@@ -74,7 +47,6 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
         setTailwindUnit,
         tailwindColorMode,
         setTailwindColorMode,
-        fileExtension,
         exportedData,
         setExportedData,
         canExport,
@@ -82,133 +54,151 @@ export const ExportView: React.FC<ExportViewProps> = ({ editorType = "" }) => {
         handleDownload
     } = useExportData({ format });
 
-    // Reset useRowColumnPos when format changes to non-CSV
-    useEffect(() => {
-        if (format !== OutputFormats.CSV) {
-            setUseRowColumnPos(false);
-        }
-    }, [format]);
-
-    // Reset useTailwindFormat when format changes to non-CSS
-    useEffect(() => {
-        if (format !== OutputFormats.CSS) {
-            setUseTailwindFormat(false);
-        }
-    }, [format]);
-
-    // Reset useDSCGFormat when format changes to non-JSON
-    useEffect(() => {
-        if (format !== OutputFormats.JSON) {
-            setUseDSCGFormat(false);
-        }
-    }, [format]);
-
-    // Clear exported data when format changes to refresh preview
+    // Clear exported data when the ACTIVE format changes to refresh preview
     useEffect(() => {
         setExportedData("");
     }, [format]);
+
+    // The description parser applies to the formats that emit the description
+    // as data: JSON (non-DSCG), JavaScript, TypeScript and CSV.
+    const showParserFor = (item: OutputFormats) =>
+        (item === OutputFormats.JSON && !useDSCGFormat) ||
+        item === OutputFormats.JS ||
+        item === OutputFormats.TS ||
+        item === OutputFormats.CSV;
+
+    // Shared option values/handlers for every per-format control block (the
+    // fields are disjoint per format, so one global object serves them all).
+    const optionControls = (item: OutputFormats) => (
+        <FormatOptionsControls
+            format={item}
+            idPrefix={`varvar-fmt-${item}`}
+            useRowColumnPos={useRowColumnPos}
+            useDSCGFormat={useDSCGFormat}
+            tailwindOutput={tailwindOutput}
+            tailwindPrefix={tailwindPrefix}
+            tailwindUnit={tailwindUnit}
+            tailwindColorMode={tailwindColorMode}
+            onUseRowColumnPosChange={setUseRowColumnPos}
+            onUseDSCGFormatChange={setUseDSCGFormat}
+            onTailwindOutputChange={setTailwindOutput}
+            onTailwindPrefixChange={setTailwindPrefix}
+            onTailwindUnitChange={setTailwindUnit}
+            onTailwindColorModeChange={setTailwindColorMode}
+        />
+    );
 
     const formControls = (
         <>
             <ExportHeader format={format} title="Export" />
 
-            <SectionAccordion label="Format" summary={formatLabel(format)}>
-                <RadioGroup.Root orientation="vertical" value={format} onValueChange={(value) => setFormat(value as OutputFormats)}>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.JSON} />
-                        JSON
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.JS} />
-                        JavaScript
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.TS} />
-                        TypeScript
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.CSV} />
-                        CSV
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.CSS} />
-                        CSS
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.TAILWIND} />
-                        Tailwind
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.REACT_NATIVE} />
-                        React Native
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.TAMAGUI} />
-                        Tamagui
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.SCSS} />
-                        SCSS
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.STYLE_DICTIONARY} />
-                        Style Dictionary
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.SWIFT} />
-                        iOS Swift
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.ANDROID} />
-                        Android
-                    </RadioGroup.Label>
-                    <RadioGroup.Label>
-                        <RadioGroup.Item value={OutputFormats.FLUTTER} />
-                        Flutter
-                    </RadioGroup.Label>
-                </RadioGroup.Root>
+            <SectionAccordion
+                label="Formats"
+                summary={
+                    formats.length > 1
+                        ? `${formats.length} selected`
+                        : formats.length === 1
+                          ? formatLabel(format)
+                          : "None"
+                }
+            >
+                {ALL_FORMATS.map((item) => {
+                    const checked = formats.includes(item);
+                    return (
+                        <div key={item}>
+                            <Checkbox.Root>
+                                <Checkbox.Input
+                                    id={`varvar-format-${item}`}
+                                    checked={checked}
+                                    onChange={() => toggleFormat(item)}
+                                />
+                                <Checkbox.Label htmlFor={`varvar-format-${item}`}>
+                                    {formatLabel(item)}
+                                </Checkbox.Label>
+                            </Checkbox.Root>
+                            {checked ? (
+                                <div style={{ paddingLeft: "var(--space-5)", paddingTop: "2px", paddingBottom: "4px", display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+                                    {optionControls(item)}
+                                    <ParserSelect
+                                        id={`varvar-parser-${item}`}
+                                        show={showParserFor(item)}
+                                    />
+                                    {item === OutputFormats.TAILWIND ? (
+                                        // Multi-file format: one filename per
+                                        // produced file (stylesheet + preset).
+                                        <>
+                                            <FilenameInput
+                                                id={`varvar-filename-${item}-css`}
+                                                label="Stylesheet filename"
+                                                extension="css"
+                                                filename={filenameByFormat["tailwind"] ?? defaultFilename("tailwind")}
+                                                emptyFallback={defaultFilename("tailwind")}
+                                                onFilenameChange={(name) => setFilenameFor("tailwind", name)}
+                                            />
+                                            <FilenameInput
+                                                id={`varvar-filename-${item}-preset`}
+                                                label="Preset filename"
+                                                extension="js"
+                                                filename={filenameByFormat["tailwind:preset"] ?? defaultFilename("tailwind:preset")}
+                                                emptyFallback={defaultFilename("tailwind:preset")}
+                                                onFilenameChange={(name) => setFilenameFor("tailwind:preset", name)}
+                                            />
+                                        </>
+                                    ) : (
+                                        <FilenameInput
+                                            id={`varvar-filename-${item}`}
+                                            extension={formatExtension(item, tailwindOutput)}
+                                            filename={filenameByFormat[item] ?? defaultFilename(item)}
+                                            emptyFallback={defaultFilename(item)}
+                                            onFilenameChange={(name) => setFilenameFor(item, name)}
+                                        />
+                                    )}
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
             </SectionAccordion>
-
-            <ExportOptions
-                format={format}
-                useRowColumnPos={useRowColumnPos}
-                useTailwindFormat={useTailwindFormat}
-                useDSCGFormat={useDSCGFormat}
-                tailwindOutput={tailwindOutput}
-                tailwindPrefix={tailwindPrefix}
-                tailwindUnit={tailwindUnit}
-                tailwindColorMode={tailwindColorMode}
-                filename={filename}
-                onUseRowColumnPosChange={setUseRowColumnPos}
-                onUseTailwindFormatChange={setUseTailwindFormat}
-                onUseDSCGFormatChange={setUseDSCGFormat}
-                onTailwindPrefixChange={setTailwindPrefix}
-                onTailwindUnitChange={setTailwindUnit}
-                onTailwindColorModeChange={setTailwindColorMode}
-                onFilenameChange={setFilename}
-            />
 
             <CollectionAccordion />
 
             <ExportActions
-                canExport={canExport}
-                exportedData={exportedData}
-                filename={filename}
-                fileFormat={fileExtension}
+                canExport={canExport && formats.length > 0}
                 onDownload={handleDownload}
             />
         </>
     );
 
-    const preview = isExporting ? (
+    // With several formats checked, the preview gets a picker to switch the
+    // previewed format without leaving the preview pane.
+    const formatPicker = formats.length > 1 ? (
+        <Select.Root
+            value={format}
+            onValueChange={(value) => setFormat(value as OutputFormats)}
+        >
+            <Select.Trigger id="varvar-preview-format" aria-label="Preview format" />
+            <Select.Content portal>
+                {formats.map((item) => (
+                    <Select.Item key={item} value={item}>
+                        {formatLabel(item)}
+                    </Select.Item>
+                ))}
+            </Select.Content>
+        </Select.Root>
+    ) : undefined;
+
+    // With no format checked there is nothing to preview: hide the pane and
+    // keep the actions disabled (canExport above).
+    const preview = formats.length === 0 ? null : isExporting ? (
         <PreviewSkeleton editorType={editorType} />
     ) : exportedData ? (
         <OutputPreview
             exportedData={exportedData}
             editorType={editorType}
+            toolbarStart={formatPicker}
             previewOptions={format === OutputFormats.TAILWIND ? [
-                { value: "css", label: `${filename}.css` },
-                { value: "preset", label: `${filename}.js` },
+                { value: "css", label: `${filenameByFormat["tailwind"] ?? defaultFilename("tailwind")}.css` },
+                { value: "preset", label: `${filenameByFormat["tailwind:preset"] ?? defaultFilename("tailwind:preset")}.js` },
             ] : undefined}
             previewOptionValue={format === OutputFormats.TAILWIND ? tailwindOutput : undefined}
             onPreviewOptionChange={format === OutputFormats.TAILWIND

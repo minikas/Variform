@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { MessageTypes, OutputFormats, TailwindOutput, TailwindUnit, TailwindColorMode } from "../types.d";
 import { formatExtension } from "../utils/formatExtension";
+import { defaultFilename, filenameKey } from "../utils/filename";
+import { requestExport } from "../utils/exportRequest";
 import { useSelection } from "../contexts/SelectionContext";
 import { hasAnySelection } from "../utils/selectionState";
 import { anyStyleSelected } from "../utils/styleSelection";
@@ -12,16 +14,10 @@ interface UseExportDataProps {
 /** Debounce before re-running the export, so rapid selection toggles coalesce. */
 const EXPORT_DEBOUNCE_MS = 150;
 
-/** Counter for tagging export requests (same pattern as utils/pluginBridge). */
-let nextExportRequestId = 0;
-
 /**
- * Decides whether an export result/error arriving from the plugin answers a
- * superseded request and must be discarded. Prefers the echoed requestId
- * (unique per request, so even same-format races are caught); falls back to
- * comparing the echoed format with the current one for messages without a
- * requestId — a slow JSON export resolving after switching to CSS must not
- * write JSON into the CSS preview.
+ * Legacy stale-response check, kept for compatibility (unit-tested). The hook
+ * now relies on the requestId correlation inside {@link requestExport} plus a
+ * sequence guard, so superseded requests never resolve into the preview.
  */
 export const isStaleExportResult = (
     messageRequestId: string | undefined,
@@ -40,8 +36,6 @@ interface UseExportDataReturn {
     setFilename: (filename: string) => void;
     useRowColumnPos: boolean;
     setUseRowColumnPos: (useRowColumnPos: boolean) => void;
-    useTailwindFormat: boolean;
-    setUseTailwindFormat: (useTailwindFormat: boolean) => void;
     useDSCGFormat: boolean;
     setUseDSCGFormat: (useDSCGFormat: boolean) => void;
     tailwindOutput: TailwindOutput;
@@ -71,8 +65,6 @@ interface UseExportDataReturn {
  * @returns An object containing the filename, options, exportedData, and the copy/download handlers
  */
 export const useExportData = ({ format }: UseExportDataProps): UseExportDataReturn => {
-    // Default the output name to "tokens" (e.g. tokens.json). The user can edit it.
-    const [filename, setFilename] = useState<string>("tokens");
     const [exportedData, setExportedData] = useState<string>("");
     const [isExporting, setIsExporting] = useState<boolean>(true);
     const [variablesCount, setVariablesCount] = useState<number>(0);
@@ -84,8 +76,6 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         parserId,
         useRowColumnPos,
         setUseRowColumnPos,
-        useTailwindFormat,
-        setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
         tailwindOutput,
@@ -96,7 +86,16 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setTailwindUnit,
         tailwindColorMode,
         setTailwindColorMode,
+        filenameByFormat,
+        setFilenameFor,
     } = useSelection();
+
+    // The download filename is per FILE (persisted in SelectionContext):
+    // single-file formats key on the format, Tailwind splits stylesheet and
+    // preset — the hook reads/writes the slice of the file it would download.
+    const fileKey = filenameKey(format, tailwindOutput);
+    const filename = filenameByFormat[fileKey] ?? defaultFilename(fileKey);
+    const setFilename = (name: string) => setFilenameFor(fileKey, name);
 
     // Send the selection only once it has been initialised (collections loaded);
     // before that, omit it so the plugin exports everything (full preview on
@@ -108,37 +107,10 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
     // when at least one collection/mode is picked, or when a style kind is on.
     const canExport = !!exportedData && (!isInitialised || hasAnySelection(selection) || anyStyleSelected(styleSelection));
 
-    // Refs so the message handler always sees the latest values regardless of
-    // when its effect last ran.
-    const formatRef = useRef(format);
-    formatRef.current = format;
-    /** RequestId of the export currently in flight (null before the first one). */
-    const pendingExportRequestIdRef = useRef<string | null>(null);
-
-    const handleExport = () => {
-        // Tag each request so late responses to superseded exports (e.g. a
-        // slow JSON export resolving after switching to CSS) can be discarded
-        // instead of overwriting the preview with the wrong format's data.
-        const requestId = `export:${nextExportRequestId++}`;
-        pendingExportRequestIdRef.current = requestId;
-        parent.postMessage({
-            pluginMessage: {
-                type: MessageTypes.EXPORT_SUCCESS,
-                requestId,
-                format,
-                useLinkedVarRowAndColPos: format === OutputFormats.CSV ? useRowColumnPos : false,
-                useTailwindFormat: format === OutputFormats.CSS ? useTailwindFormat : false,
-                useDSCGFormat: format === OutputFormats.JSON ? useDSCGFormat : false,
-                tailwindOutput: format === OutputFormats.TAILWIND ? tailwindOutput : undefined,
-                tailwindPrefix: format === OutputFormats.TAILWIND ? tailwindPrefix : undefined,
-                tailwindUnit: format === OutputFormats.TAILWIND ? tailwindUnit : undefined,
-                tailwindColorMode: format === OutputFormats.TAILWIND ? tailwindColorMode : undefined,
-                selection: exportSelection,
-                styleSelection,
-                parserId
-            }
-        }, "*");
-    };
+    // Sequence number of the latest export request, so only the most recent
+    // one may write the preview (late responses to superseded requests are
+    // already filtered out by requestExport's requestId correlation).
+    const exportSeqRef = useRef(0);
 
     const downloadFile = (data: string, fileFormat: string, fileName: string) => {
         const blob = new Blob([data], { type: "text/plain" });
@@ -164,18 +136,6 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         window.onmessage = ({ data: { pluginMessage } }) => {
             if (pluginMessage.type === MessageTypes.BASIC_INFO) {
                 setVariablesCount(pluginMessage.count);
-            } else if (pluginMessage.type === MessageTypes.EXPORT_SUCCESS_RESULT) {
-                // Drop late responses to superseded requests (see handleExport).
-                if (isStaleExportResult(pluginMessage.requestId, pluginMessage.format, pendingExportRequestIdRef.current, formatRef.current)) {
-                    return;
-                }
-                setExportedData(pluginMessage.data);
-                setIsExporting(false);
-            } else if (pluginMessage.type === MessageTypes.EXPORT_ERROR) {
-                if (isStaleExportResult(pluginMessage.requestId, pluginMessage.format, pendingExportRequestIdRef.current, formatRef.current)) {
-                    return;
-                }
-                setIsExporting(false);
             }
         };
     }, []);
@@ -188,9 +148,35 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         // Enter the loading state immediately (covers the debounce window too) so
         // the preview shows a skeleton while transitioning between formats.
         setIsExporting(true);
-        const handle = setTimeout(() => handleExport(), EXPORT_DEBOUNCE_MS);
+        const seq = ++exportSeqRef.current;
+        const handle = setTimeout(() => {
+            requestExport(format, {
+                useRowColumnPos,
+                useDSCGFormat,
+                tailwindOutput,
+                tailwindPrefix,
+                tailwindUnit,
+                tailwindColorMode,
+                selection: exportSelection,
+                styleSelection,
+                parserId,
+            })
+                .then((data) => {
+                    if (exportSeqRef.current === seq) {
+                        setExportedData(data);
+                        setIsExporting(false);
+                    }
+                })
+                .catch(() => {
+                    // Export failed in the sandbox (EXPORT_ERROR) or timed out —
+                    // leave the loading state so the skeleton does not spin forever.
+                    if (exportSeqRef.current === seq) {
+                        setIsExporting(false);
+                    }
+                });
+        }, EXPORT_DEBOUNCE_MS);
         return () => clearTimeout(handle);
-    }, [format, useRowColumnPos, useTailwindFormat, useDSCGFormat, tailwindOutput, tailwindPrefix, tailwindUnit, tailwindColorMode, selection, styleSelection, parserId]);
+    }, [format, useRowColumnPos, useDSCGFormat, tailwindOutput, tailwindPrefix, tailwindUnit, tailwindColorMode, selection, styleSelection, parserId]);
 
     // Request basic info on mount (only if not already received)
     useEffect(() => {
@@ -204,8 +190,6 @@ export const useExportData = ({ format }: UseExportDataProps): UseExportDataRetu
         setFilename,
         useRowColumnPos,
         setUseRowColumnPos,
-        useTailwindFormat,
-        setUseTailwindFormat,
         useDSCGFormat,
         setUseDSCGFormat,
         tailwindOutput,

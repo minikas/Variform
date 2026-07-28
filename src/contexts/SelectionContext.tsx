@@ -21,6 +21,15 @@ import {
 } from "../utils/selectionState";
 import { ALL_STYLES } from "../utils/styleSelection";
 import { NO_PARSER_ID } from "../utils/descriptionParsers";
+import { toggleCheckedFormat } from "../utils/formatSelection";
+import { defaultBranchName } from "../utils/github/branchName";
+import {
+  PUSH_TARGETS_VERSION,
+  parseStoredTargets,
+  toPersistedTargets,
+  type PersistedPushTarget,
+  type PushTarget,
+} from "../utils/github/pushTargets";
 
 /** Prefix for the per-document export-selection key in figma.clientStorage. */
 const SELECTION_STORAGE_PREFIX = "varvar:export-selection:";
@@ -32,14 +41,24 @@ interface PersistedSelection {
   styleSelection: StyleSelection;
   parserId: string;
   format: OutputFormats;
+  /** Checked formats on the main page (multi-select); active = `format`. */
+  formats?: OutputFormats[];
   useRowColumnPos: boolean;
-  useTailwindFormat: boolean;
   useDSCGFormat: boolean;
   tailwindOutput: TailwindOutput;
   tailwindPrefix: string;
   tailwindUnit: TailwindUnit;
   tailwindColorMode: TailwindColorMode;
-  githubFilePath: string;
+  /**
+   * Download filename (without extension) per file key: the format itself for
+   * single-file formats, plus "tailwind:preset" for the Tailwind preset file.
+   */
+  filenameByFormat?: Partial<Record<string, string>>;
+  /** Legacy single push path — read-only, only to migrate into pushTargets. */
+  githubFilePath?: string;
+  /** Multi-format push targets (versioned via pushTargetsVersion). */
+  pushTargets?: PersistedPushTarget[];
+  pushTargetsVersion?: number;
 }
 
 interface SelectionContextValue {
@@ -65,11 +84,19 @@ interface SelectionContextValue {
   /** Selected output format (persisted; drives the generic export view). */
   format: OutputFormats;
   setFormat: (format: OutputFormats) => void;
+  /**
+   * Checked formats on the main page (persisted, multi-select). The active
+   * format (`format`) is the last checked one; unchecking everything is allowed
+   * (the preview hides and the actions disable while the set is empty).
+   * Single-format menu views (ExportJSON/CSV/CSS/JS) ignore this.
+   */
+  formats: OutputFormats[];
+  setFormats: (formats: OutputFormats[]) => void;
+  /** Check/uncheck a format, keeping `format` as the last checked one. */
+  toggleFormat: (format: OutputFormats) => void;
   /** Format-specific export option toggles (persisted). */
   useRowColumnPos: boolean;
   setUseRowColumnPos: (value: boolean) => void;
-  useTailwindFormat: boolean;
-  setUseTailwindFormat: (value: boolean) => void;
   useDSCGFormat: boolean;
   setUseDSCGFormat: (value: boolean) => void;
   /** Tailwind-format options (persisted): which output and optional prefix. */
@@ -82,9 +109,20 @@ interface SelectionContextValue {
   setTailwindUnit: (value: TailwindUnit) => void;
   tailwindColorMode: TailwindColorMode;
   setTailwindColorMode: (value: TailwindColorMode) => void;
-  /** GitHub push file path, persisted per document. */
-  githubFilePath: string;
-  setGithubFilePath: (path: string) => void;
+  /**
+   * Download filename (without extension) per file key (persisted per
+   * document; defaults in utils/filename). Multi-file formats have one entry
+   * per file (Tailwind: "tailwind" for the stylesheet, "tailwind:preset" for
+   * the preset). Downloads and preview labels use the active file's.
+   */
+  filenameByFormat: Partial<Record<string, string>>;
+  setFilenameFor: (key: string, name: string) => void;
+  /**
+   * Multi-format push targets, persisted per document (branch names excluded —
+   * they are reseeded per session).
+   */
+  pushTargets: PushTarget[];
+  setPushTargets: (targets: PushTarget[]) => void;
 }
 
 const SelectionContext = createContext<SelectionContextValue | null>(null);
@@ -103,14 +141,15 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
   const [styleSelection, setStyleSelection] = useState<StyleSelection>(ALL_STYLES);
   const [parserId, setParserId] = useState<string>(NO_PARSER_ID);
   const [format, setFormat] = useState<OutputFormats>(OutputFormats.JSON);
+  const [formats, setFormats] = useState<OutputFormats[]>([OutputFormats.JSON]);
   const [useRowColumnPos, setUseRowColumnPos] = useState<boolean>(false);
-  const [useTailwindFormat, setUseTailwindFormat] = useState<boolean>(false);
   const [useDSCGFormat, setUseDSCGFormat] = useState<boolean>(false);
   const [tailwindOutput, setTailwindOutput] = useState<TailwindOutput>("css");
   const [tailwindPrefix, setTailwindPrefix] = useState<string>("");
   const [tailwindUnit, setTailwindUnit] = useState<TailwindUnit>("px");
   const [tailwindColorMode, setTailwindColorMode] = useState<TailwindColorMode>("var-fallback");
-  const [githubFilePath, setGithubFilePath] = useState<string>("");
+  const [filenameByFormat, setFilenameByFormat] = useState<Partial<Record<string, string>>>({});
+  const [pushTargets, setPushTargets] = useState<PushTarget[]>([]);
   const [filename, setFilename] = useState<string>("");
   // `undefined` until client storage replies; then the raw stored string or null.
   const [storedRaw, setStoredRaw] = useState<string | null | undefined>(undefined);
@@ -190,11 +229,27 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
             if (parsed.format) {
               setFormat(parsed.format);
             }
+            // Checked formats (multi-select). Records saved before multi-select
+            // have no field: the single active format is the checked one. An
+            // explicit empty array is respected (the user unchecked everything).
+            const hasFormatsField = Array.isArray(parsed.formats);
+            const restoredFormats = hasFormatsField
+              ? (parsed.formats as unknown[]).filter(
+                  (f): f is OutputFormats =>
+                    typeof f === "string" &&
+                    (Object.values(OutputFormats) as string[]).includes(f),
+                )
+              : [];
+            if (restoredFormats.length > 0) {
+              setFormats(restoredFormats);
+              if (!parsed.format || !restoredFormats.includes(parsed.format)) {
+                setFormat(restoredFormats[restoredFormats.length - 1]);
+              }
+            } else if (!hasFormatsField) {
+              setFormats([parsed.format ?? OutputFormats.JSON]);
+            }
             if (typeof parsed.useRowColumnPos === "boolean") {
               setUseRowColumnPos(parsed.useRowColumnPos);
-            }
-            if (typeof parsed.useTailwindFormat === "boolean") {
-              setUseTailwindFormat(parsed.useTailwindFormat);
             }
             if (typeof parsed.useDSCGFormat === "boolean") {
               setUseDSCGFormat(parsed.useDSCGFormat);
@@ -211,8 +266,24 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
             if (parsed.tailwindColorMode === "var-fallback" || parsed.tailwindColorMode === "var" || parsed.tailwindColorMode === "concrete" || parsed.tailwindColorMode === "hex") {
               setTailwindColorMode(parsed.tailwindColorMode);
             }
-            if (typeof parsed.githubFilePath === "string") {
-              setGithubFilePath(parsed.githubFilePath);
+            if (parsed.filenameByFormat && typeof parsed.filenameByFormat === "object") {
+              const validKeys = [...(Object.values(OutputFormats) as string[]), "tailwind:preset"];
+              const restoredNames: Partial<Record<string, string>> = {};
+              for (const [key, value] of Object.entries(parsed.filenameByFormat)) {
+                if (validKeys.includes(key) && typeof value === "string") {
+                  restoredNames[key] = value;
+                }
+              }
+              setFilenameByFormat(restoredNames);
+            }
+            // Push targets: restore the persisted set (fresh branch seed) or
+            // migrate the legacy single githubFilePath into an initial target.
+            const restoredTargets = parseStoredTargets(
+              parsed,
+              defaultBranchName(filename || "variables", Date.now().toString(36).slice(-4)),
+            );
+            if (restoredTargets) {
+              setPushTargets(restoredTargets);
             }
           }
         } catch {
@@ -240,14 +311,18 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
         styleSelection,
         parserId,
         format,
+        formats,
         useRowColumnPos,
-        useTailwindFormat,
         useDSCGFormat,
         tailwindOutput,
         tailwindPrefix,
         tailwindUnit,
         tailwindColorMode,
-        githubFilePath,
+        filenameByFormat,
+        // Branch names are session-scoped: strip them from the persisted set
+        // (they are reseeded on every load — see parseStoredTargets).
+        pushTargets: toPersistedTargets(pushTargets),
+        pushTargetsVersion: PUSH_TARGETS_VERSION,
       };
       parent.postMessage(
         {
@@ -266,14 +341,15 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
     styleSelection,
     parserId,
     format,
+    formats,
     useRowColumnPos,
-    useTailwindFormat,
     useDSCGFormat,
     tailwindOutput,
     tailwindPrefix,
     tailwindUnit,
     tailwindColorMode,
-    githubFilePath,
+    filenameByFormat,
+    pushTargets,
     storageKey,
   ]);
 
@@ -302,6 +378,23 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
     setStyleSelection((prev) => ({ ...prev, [kind]: !prev[kind] }));
   }, []);
 
+  const setFilenameFor = useCallback((key: string, name: string) => {
+    setFilenameByFormat((prev) => ({ ...prev, [key]: name }));
+  }, []);
+
+  // Check/uncheck a format on the main page: checking makes it the active
+  // format; unchecking everything is allowed (see formatSelection).
+  const toggleFormat = useCallback(
+    (target: OutputFormats) => {
+      const next = toggleCheckedFormat(formats, target, format);
+      setFormats(next.checked);
+      if (next.active !== format) {
+        setFormat(next.active);
+      }
+    },
+    [formats, format],
+  );
+
   const value = useMemo<SelectionContextValue>(
     () => ({
       collections,
@@ -319,10 +412,11 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
       setParserId,
       format,
       setFormat,
+      formats,
+      setFormats,
+      toggleFormat,
       useRowColumnPos,
       setUseRowColumnPos,
-      useTailwindFormat,
-      setUseTailwindFormat,
       useDSCGFormat,
       setUseDSCGFormat,
       tailwindOutput,
@@ -333,8 +427,10 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
       setTailwindUnit,
       tailwindColorMode,
       setTailwindColorMode,
-      githubFilePath,
-      setGithubFilePath,
+      filenameByFormat,
+      setFilenameFor,
+      pushTargets,
+      setPushTargets,
     }),
     [
       collections,
@@ -342,20 +438,23 @@ export const SelectionProvider: React.FC<{ children: React.ReactNode }> = ({
       styleSelection,
       parserId,
       format,
+      formats,
       useRowColumnPos,
-      useTailwindFormat,
       useDSCGFormat,
       tailwindOutput,
       tailwindPrefix,
       tailwindUnit,
       tailwindColorMode,
-      githubFilePath,
+      filenameByFormat,
+      pushTargets,
       toggleMode,
       toggleCollection,
       getCheckedState,
       selectAll,
       deselectAll,
       toggleStyleKind,
+      toggleFormat,
+      setFilenameFor,
     ]
   );
 
